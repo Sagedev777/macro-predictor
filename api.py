@@ -10,6 +10,8 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 from database import init_db, SessionLocal, Prediction as PredictionModel, AlertLog, Release
@@ -429,7 +431,9 @@ def send_event_telegram(event_code: str):
 
     result = build_composite_score(code)
     direction = result["lean_direction"]
-    trade_signals = EVENTS[code].get("trade_signals", {}).get(direction, [])
+    # Normalize BEAT→BULLISH, MISS→BEARISH to match EVENTS config keys
+    dir_key = "BULLISH" if direction in ("BEAT", "BULLISH") else ("BEARISH" if direction in ("MISS", "BEARISH") else "INLINE")
+    trade_signals = EVENTS[code].get("trade_signals", {}).get(dir_key, [])
     result["trade_signals"] = trade_signals
     ok = send_telegram_alert(result)
     return {"success": ok, "event_code": code}
@@ -443,7 +447,9 @@ def broadcast_all_to_telegram():
         try:
             pred = build_composite_score(code)
             direction = pred["lean_direction"]
-            trade_signals = EVENTS[code].get("trade_signals", {}).get(direction, [])
+            # Normalize BEAT→BULLISH, MISS→BEARISH to match EVENTS config keys
+            dir_key = "BULLISH" if direction in ("BEAT", "BULLISH") else ("BEARISH" if direction in ("MISS", "BEARISH") else "INLINE")
+            trade_signals = EVENTS[code].get("trade_signals", {}).get(dir_key, [])
             pred["trade_signals"] = trade_signals
             ok = send_telegram_alert(pred)
             results.append({"event_code": code, "success": ok})

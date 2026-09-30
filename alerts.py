@@ -9,6 +9,7 @@ Sends a pre-formatted message to your Telegram chat with:
 """
 
 import os
+import re
 import logging
 import requests
 from dotenv import load_dotenv
@@ -33,6 +34,20 @@ SIGNAL_EMOJI = {
 }
 
 
+def _normalize_direction(direction: str) -> str:
+    """
+    Normalize lean_direction to the key used in EVENTS config.
+    The indicator engine returns 'BEAT'/'MISS'/'INLINE' but EVENTS uses
+    'BULLISH'/'BEARISH'/'INLINE' as keys for trade_signals, event_labels, explanations.
+    """
+    d = (direction or "").upper()
+    if d in ("BEAT", "BULLISH"):
+        return "BULLISH"
+    if d in ("MISS", "BEARISH"):
+        return "BEARISH"
+    return "INLINE"
+
+
 def _format_prediction_message(prediction: dict, release_time: str = None) -> str:
     """Build the Telegram message from a prediction dict."""
     event_code   = prediction["event_code"]
@@ -41,10 +56,14 @@ def _format_prediction_message(prediction: dict, release_time: str = None) -> st
     composite    = prediction["composite_score"]
     indicators   = prediction["indicator_breakdown"]
 
-    event_label = prediction.get("event_label") or EVENTS.get(event_code, {}).get("event_labels", {}).get(direction, direction)
-    explanation = prediction.get("explanation") or EVENTS.get(event_code, {}).get("explanations", {}).get(direction, "")
+    # Normalize so BEAT→BULLISH, MISS→BEARISH for config lookups
+    dir_key = _normalize_direction(direction)
 
-    macro_bias = "🟢 USD BULLISH" if direction in ("BEAT", "BULLISH") else ("🔴 USD BEARISH" if direction in ("MISS", "BEARISH") else "🟡 NEUTRAL")
+    event_cfg   = EVENTS.get(event_code, {})
+    event_label = prediction.get("event_label") or event_cfg.get("event_labels", {}).get(dir_key, direction)
+    explanation = prediction.get("explanation") or event_cfg.get("explanations", {}).get(dir_key, "")
+
+    macro_bias = "🟢 USD BULLISH" if dir_key == "BULLISH" else ("🔴 USD BEARISH" if dir_key == "BEARISH" else "🟡 NEUTRAL")
     conf_bar = "█" * int(confidence / 10) + "░" * (10 - int(confidence / 10))
 
     lines = [
@@ -63,15 +82,52 @@ def _format_prediction_message(prediction: dict, release_time: str = None) -> st
         clean_exp = explanation.replace("_", " ").replace("*", "")
         lines += ["", "─────────────────────", f"💡 *Outlook:* _{clean_exp}_"]
 
-    # Add trade signals if available
+    # Standard affected pairs fallback per event
+    default_pairs = {
+        "NFP": ["EURUSD", "USDJPY", "GBPUSD", "XAUUSD"],
+        "CPI": ["EURUSD", "USDJPY", "XAUUSD", "GBPUSD"],
+        "CORE_CPI": ["EURUSD", "USDJPY", "XAUUSD", "GBPUSD"],
+        "PPI": ["EURUSD", "USDJPY", "XAUUSD"],
+        "JOBLESS_CLAIMS": ["EURUSD", "USDJPY", "XAUUSD", "GBPUSD"],
+        "UNEMPLOYMENT_RATE": ["EURUSD", "USDJPY", "GBPUSD", "XAUUSD"],
+        "GDP": ["EURUSD", "USDJPY", "US500", "XAUUSD"],
+        "FOMC": ["EURUSD", "USDJPY", "XAUUSD", "US500", "US30"],
+        "RETAIL_SALES": ["EURUSD", "USDJPY", "US30", "XAUUSD"],
+        "ISM_MFG": ["USDJPY", "EURUSD", "US30"],
+        "CONSUMER_CONFIDENCE": ["EURUSD", "USDJPY", "US500"],
+    }.get(event_code, ["EURUSD", "USDJPY", "GBPUSD", "XAUUSD"])
+
+    # Add trade signals & affected pairs — always look up using normalized direction key
     trade_signals = prediction.get("trade_signals")
-    if not trade_signals and event_code in EVENTS:
-        trade_signals = EVENTS[event_code].get("trade_signals", {}).get(direction, [])
+    if not trade_signals:
+        # Try normalized key first (BULLISH/BEARISH/INLINE)
+        trade_signals = event_cfg.get("trade_signals", {}).get(dir_key, [])
+    if not trade_signals:
+        # Final fallback: try raw direction string
+        trade_signals = event_cfg.get("trade_signals", {}).get(direction, [])
+
+    if isinstance(trade_signals, str):
+        trade_signals = [s.strip() for s in trade_signals.split(",") if s.strip()] or [trade_signals]
+
+    # Extract all asset/currency pairs from the signals
+    extracted_pairs = []
+    if trade_signals:
+        for ts in trade_signals:
+            for word in ts.split():
+                clean_word = re.sub(r"[^A-Za-z0-9]", "", word).upper()
+                if clean_word in ("USDJPY", "EURUSD", "GBPUSD", "XAUUSD", "US500", "US30", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD", "GOLD"):
+                    if clean_word not in extracted_pairs:
+                        extracted_pairs.append(clean_word)
+
+    final_pairs = extracted_pairs if extracted_pairs else default_pairs
+
+    lines += ["", "─────────────────────", "🎯 *Pairs to be Affected:*"]
+    lines.append(" • ".join([f"`{p}`" for p in final_pairs]))
 
     if trade_signals:
-        lines += ["", "─────────────────────", "*Trade Signals:*"]
+        lines += ["", "⚡ *Trade Execution Signals:*"]
         for ts in trade_signals:
-            lines.append(f"⚡ `{ts}`")
+            lines.append(f"• `{ts}`")
 
     lines += ["", "─────────────────────", "*Leading Indicators:*"]
 
@@ -127,7 +183,7 @@ def send_test_message() -> bool:
     try:
         r = requests.post(url, json={
             "chat_id": CHAT_ID,
-            "text": "✅ *MacroPredictor* connected successfully! Real-time alerts are live.",
+            "text": "✅ *TitanFX Sage — MacroPredictor* connected! Real-time pre-release signals & outcome alerts are live.",
             "parse_mode": "Markdown",
         }, timeout=10)
         r.raise_for_status()

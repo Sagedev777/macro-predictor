@@ -1,16 +1,193 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import axios from 'axios'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   RefreshCw, TrendingUp, TrendingDown, Minus, Zap,
   Bell, CheckCircle, AlertCircle, Calendar, Award,
-  Clock, ArrowUpRight, Send
+  Clock, ArrowUpRight, Send, ChevronDown
 } from 'lucide-react'
 
-const API = 'http://localhost:8000'
+const API = (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && window.location.port === '5173')
+  ? 'http://localhost:8000'
+  : ''
 
 // Events where LOWER actual = positive surprise (fewer unemployed = stronger economy)
 const INVERSE_EVENTS = new Set(['JOBLESS_CLAIMS', 'UNEMPLOYMENT_RATE'])
+
+// Mapping of currency pairs and assets directly affected by each event
+const EVENT_AFFECTED_PAIRS: Record<string, string[]> = {
+  NFP: ['EUR/USD', 'USD/JPY', 'GBP/USD', 'XAU/USD', 'US500'],
+  CPI: ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD', 'US500'],
+  CORE_CPI: ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD'],
+  PPI: ['EUR/USD', 'USD/JPY', 'XAU/USD'],
+  JOBLESS_CLAIMS: ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD'],
+  UNEMPLOYMENT_RATE: ['EUR/USD', 'USD/JPY', 'GBP/USD', 'XAU/USD'],
+  GDP: ['EUR/USD', 'USD/JPY', 'US500', 'XAU/USD'],
+  FOMC: ['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500', 'US30'],
+  RETAIL_SALES: ['EUR/USD', 'USD/JPY', 'US30', 'XAU/USD'],
+  ISM_MFG: ['USD/JPY', 'EUR/USD', 'US30'],
+  CONSUMER_CONFIDENCE: ['EUR/USD', 'USD/JPY', 'US500'],
+}
+
+interface EventTiming {
+  dateFormatted: string
+  timeNy: string
+  timeLocal: string
+  countdownText: string
+  urgency: 'imminent' | 'soon' | 'today' | 'future' | 'passed'
+  isPassed: boolean
+  diffMs: number
+}
+
+function getEventTiming(releaseTimeUtc: string, now: number): EventTiming {
+  if (!releaseTimeUtc) {
+    return {
+      dateFormatted: 'Date TBD',
+      timeNy: 'TBD',
+      timeLocal: 'TBD',
+      countdownText: 'TBD',
+      urgency: 'future',
+      isPassed: false,
+      diffMs: 0,
+    }
+  }
+
+  const d = new Date(releaseTimeUtc)
+  const targetMs = d.getTime()
+  if (isNaN(targetMs)) {
+    return {
+      dateFormatted: 'Date TBD',
+      timeNy: 'TBD',
+      timeLocal: 'TBD',
+      countdownText: 'TBD',
+      urgency: 'future',
+      isPassed: false,
+      diffMs: 0,
+    }
+  }
+
+  const dateFormatted = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(d)
+
+  let timeNy = ''
+  try {
+    timeNy = new Intl.DateTimeFormat('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'America/New_York',
+      timeZoneName: 'short',
+    }).format(d)
+  } catch {
+    timeNy = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
+  const timeLocal = new Intl.DateTimeFormat('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  }).format(d)
+
+  const diffMs = targetMs - now
+  const isPassed = diffMs <= 0
+
+  let countdownText = ''
+  let urgency: 'imminent' | 'soon' | 'today' | 'future' | 'passed' = 'future'
+
+  if (isPassed) {
+    const passedMins = Math.floor(-diffMs / 60000)
+    if (passedMins < 60) {
+      countdownText = `Released ${passedMins}m ago`
+    } else if (passedMins < 1440) {
+      countdownText = `Released ${Math.floor(passedMins / 60)}h ${passedMins % 60}m ago`
+    } else {
+      countdownText = `Completed (${Math.floor(passedMins / 1440)}d ago)`
+    }
+    urgency = 'passed'
+  } else {
+    const totalSecs = Math.floor(diffMs / 1000)
+    const days = Math.floor(totalSecs / 86400)
+    const hours = Math.floor((totalSecs % 86400) / 3600)
+    const mins = Math.floor((totalSecs % 3600) / 60)
+    const secs = totalSecs % 60
+
+    if (days > 0) {
+      countdownText = `${days}d ${hours.toString().padStart(2, '0')}h ${mins.toString().padStart(2, '0')}m ${secs.toString().padStart(2, '0')}s`
+    } else {
+      countdownText = `${hours.toString().padStart(2, '0')}h ${mins.toString().padStart(2, '0')}m ${secs.toString().padStart(2, '0')}s`
+    }
+
+    if (diffMs <= 15 * 60 * 1000) {
+      urgency = 'imminent'
+    } else if (diffMs <= 2 * 3600 * 1000) {
+      urgency = 'soon'
+    } else if (diffMs <= 24 * 3600 * 1000) {
+      urgency = 'today'
+    } else {
+      urgency = 'future'
+    }
+  }
+
+  return {
+    dateFormatted,
+    timeNy,
+    timeLocal,
+    countdownText,
+    urgency,
+    isPassed,
+    diffMs,
+  }
+}
+
+function CountdownBadge({ releaseTimeUtc, now }: { releaseTimeUtc: string; now: number }) {
+  const timing = getEventTiming(releaseTimeUtc, now)
+
+  if (timing.urgency === 'imminent') {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-black bg-red-500/25 text-red-300 border border-red-500 animate-pulse shadow-lg shadow-red-500/30">
+        <span className="w-2 h-2 rounded-full bg-red-400 animate-ping" />
+        🚨 IMMINENT: {timing.countdownText}
+      </span>
+    )
+  }
+
+  if (timing.urgency === 'soon') {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse shadow-md shadow-amber-500/20">
+        <Clock className="w-3.5 h-3.5 text-amber-400" />
+        ⚠️ SOON: {timing.countdownText}
+      </span>
+    )
+  }
+
+  if (timing.urgency === 'today') {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+        <Clock className="w-3.5 h-3.5 text-indigo-400" />
+        ⏳ TODAY: {timing.countdownText}
+      </span>
+    )
+  }
+
+  if (timing.urgency === 'passed') {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-medium bg-slate-800 text-slate-400 border border-white/10">
+        <CheckCircle className="w-3.5 h-3.5 text-slate-500" />
+        {timing.countdownText}
+      </span>
+    )
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+      <Clock className="w-3.5 h-3.5 text-cyan-400" />
+      ⏱️ {timing.countdownText}
+    </span>
+  )
+}
 
 function getSurpriseColor(eventCode: string, surprise: number | null): string {
   if (surprise == null) return '#94a3b8'
@@ -163,10 +340,14 @@ function IndicatorRow({ ind }: { ind: Indicator }) {
 
 function PredictionCard({
   pred,
+  calendarEvent,
+  now = Date.now(),
   onRefresh,
   onSendTelegram
 }: {
   pred: Prediction
+  calendarEvent?: CalendarEvent
+  now?: number
   onRefresh: (code: string) => void
   onSendTelegram: (code: string) => Promise<boolean>
 }) {
@@ -207,7 +388,7 @@ function PredictionCard({
       style={{ borderColor: cfg.color + '35' }}
     >
       {/* ── Header row ── */}
-      <div className="flex items-start justify-between gap-4 mb-4">
+      <div className="flex items-start justify-between gap-4 mb-3">
         <div>
           <div className="flex items-center gap-2 mb-1">
             <span className="text-[10px] font-black tracking-widest text-indigo-400 uppercase bg-indigo-500/10 px-2 py-0.5 rounded">
@@ -261,6 +442,22 @@ function PredictionCard({
         </div>
       </div>
 
+      {/* ── Scheduled Release Time & Live Countdown Bar ── */}
+      {calendarEvent?.release_time_utc && (
+        <div className="mb-4 px-3 py-2 rounded-xl bg-slate-800/80 border border-indigo-500/20 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 text-slate-300">
+            <Clock className="w-3.5 h-3.5 text-indigo-400 flex-shrink-0" />
+            <span className="font-semibold text-slate-200">
+              {getEventTiming(calendarEvent.release_time_utc, now).dateFormatted}
+            </span>
+            <span className="text-cyan-300 font-mono text-[11px]">
+              • {getEventTiming(calendarEvent.release_time_utc, now).timeNy} (NY)
+            </span>
+          </div>
+          <CountdownBadge releaseTimeUtc={calendarEvent.release_time_utc} now={now} />
+        </div>
+      )}
+
       {/* ── Direction + Score Banner ── */}
       <div className="flex items-center justify-between gap-4 mb-4 bg-white/[0.02] p-3 rounded-xl border border-white/5">
         <div className="flex items-center gap-2.5">
@@ -298,6 +495,23 @@ function PredictionCard({
           </span>
         </div>
         <ConfidenceBar pct={pred.confidence_pct} color={cfg.color} />
+      </div>
+
+      {/* ── Affected Pairs ── */}
+      <div className="mb-3">
+        <p className="text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-1.5">
+          🎯 Pairs to be Affected
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {(EVENT_AFFECTED_PAIRS[pred.event_code] || ['EUR/USD', 'USD/JPY', 'GBP/USD', 'XAU/USD', 'US500']).map((pair, idx) => (
+            <span
+              key={idx}
+              className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-md bg-indigo-950/40 text-indigo-300 border border-indigo-500/20"
+            >
+              {pair}
+            </span>
+          ))}
+        </div>
       </div>
 
       {/* ── Trade Signals ── */}
@@ -383,6 +597,356 @@ function PredictionCard({
   )
 }
 
+// ── Event Filter Dropdown ────────────────────────────────────────────────────
+function EventFilterDropdown({
+  events, selected, onSelect, totalCount
+}: {
+  events: string[]
+  selected: string | null
+  onSelect: (code: string | null) => void
+  totalCount: number
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const EVENT_LABELS: Record<string, string> = {
+    NFP: 'Non-Farm Payrolls',
+    CPI: 'Consumer Price Index',
+    CORE_CPI: 'Core CPI (ex Food & Energy)',
+    PPI: 'Producer Price Index',
+    UNEMPLOYMENT_RATE: 'Unemployment Rate',
+    JOBLESS_CLAIMS: 'Initial Jobless Claims',
+    CONSUMER_CONFIDENCE: 'Consumer Confidence',
+    FOMC: 'FOMC Rate Decision',
+    RETAIL_SALES: 'Retail Sales',
+    ISM_MFG: 'ISM Manufacturing PMI',
+    GDP: 'GDP Growth Rate',
+  }
+
+  const selectedLabel = selected ? (EVENT_LABELS[selected] || selected) : `All Events (${totalCount})`
+
+  return (
+    <div ref={ref} className="relative mb-5">
+      {/* Trigger button */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        className={`w-full flex items-center justify-between gap-3 px-4 py-3 rounded-xl border transition-all ${
+          open || selected
+            ? 'bg-indigo-600/20 border-indigo-500/50 text-white'
+            : 'glass border-white/10 text-slate-300 hover:border-white/20 hover:text-white'
+        }`}
+        style={open ? { boxShadow: '0 0 0 2px rgba(99,102,241,0.35)' } : {}}
+      >
+        <div className="flex items-center gap-2.5">
+          <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+            selected ? 'bg-green-400 shadow-sm shadow-green-400' : 'bg-slate-500'
+          }`} />
+          <span className="text-sm font-bold font-mono">{selectedLabel}</span>
+          {selected && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-semibold">
+              FOCUSED
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {selected && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onSelect(null) }}
+              className="text-[10px] text-slate-400 hover:text-red-400 px-2 py-0.5 rounded bg-white/5 hover:bg-red-500/10 border border-white/10 transition-all font-semibold"
+            >
+              ✕ Clear
+            </button>
+          )}
+          <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+        </div>
+      </button>
+
+      {/* Dropdown panel */}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -8, scaleY: 0.92 }}
+            animate={{ opacity: 1, y: 0, scaleY: 1 }}
+            exit={{ opacity: 0, y: -8, scaleY: 0.92 }}
+            transition={{ duration: 0.15, ease: 'easeOut' }}
+            style={{ transformOrigin: 'top' }}
+            className="absolute z-50 w-full mt-2 glass border border-white/10 rounded-xl overflow-hidden shadow-2xl shadow-black/60"
+          >
+            {/* All Events option */}
+            <button
+              onClick={() => { onSelect(null); setOpen(false) }}
+              className={`w-full flex items-center justify-between px-4 py-3 text-sm font-semibold transition-all border-b border-white/5 ${
+                selected === null
+                  ? 'bg-indigo-600/25 text-white'
+                  : 'text-slate-400 hover:bg-white/5 hover:text-white'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <span className="text-base">📊</span>
+                <span>All Events</span>
+              </div>
+              <span className="text-xs font-mono text-slate-500">{totalCount} loaded</span>
+            </button>
+
+            {/* Individual events */}
+            <div className="grid grid-cols-1 sm:grid-cols-2">
+              {events.map((code) => {
+                const isSelected = selected === code
+                const icons: Record<string, string> = {
+                  NFP: '💼', CPI: '🏷️', CORE_CPI: '🔥', PPI: '🏭',
+                  UNEMPLOYMENT_RATE: '📉', JOBLESS_CLAIMS: '📋',
+                  CONSUMER_CONFIDENCE: '😊', FOMC: '🏛️',
+                  RETAIL_SALES: '🛒', ISM_MFG: '⚙️', GDP: '📈'
+                }
+                return (
+                  <button
+                    key={code}
+                    onClick={() => { onSelect(code); setOpen(false) }}
+                    className={`flex items-center gap-3 px-4 py-3 text-left transition-all border-b border-white/[0.04] last:border-0 ${
+                      isSelected
+                        ? 'bg-indigo-600/20 text-white'
+                        : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+                    }`}
+                  >
+                    <span className="text-base flex-shrink-0">{icons[code] || '📌'}</span>
+                    <div className="min-w-0">
+                      <p className="text-xs font-black font-mono" style={{ color: isSelected ? '#818cf8' : '' }}>{code}</p>
+                      <p className="text-[10px] text-slate-500 truncate">{EVENT_LABELS[code] || code}</p>
+                    </div>
+                    {isSelected && <CheckCircle className="w-3.5 h-3.5 text-indigo-400 ml-auto flex-shrink-0" />}
+                  </button>
+                )
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+// ── Next Major Red-Folder News Radar Banner ──────────────────────────────────
+function NextEventRadar({
+  events,
+  onAnalyze,
+  now
+}: {
+  events: CalendarEvent[]
+  onAnalyze: (code: string) => void
+  now: number
+}) {
+  if (!events || events.length === 0) return null
+
+  // Sort chronologically
+  const sorted = [...events].sort((a, b) => {
+    const tA = new Date(a.release_time_utc).getTime() || 0
+    const tB = new Date(b.release_time_utc).getTime() || 0
+    return tA - tB
+  })
+
+  // Find nearest upcoming event that hasn't passed, or fall back to the first
+  const upcoming = sorted.find(e => {
+    const t = new Date(e.release_time_utc).getTime()
+    return t && t > now
+  }) || sorted[0]
+
+  if (!upcoming) return null
+
+  const timing = getEventTiming(upcoming.release_time_utc, now)
+  const pairs = EVENT_AFFECTED_PAIRS[upcoming.event_code] || ['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500']
+
+  return (
+    <div className="mb-6 relative overflow-hidden rounded-2xl border border-indigo-500/30 bg-gradient-to-r from-slate-900/90 via-indigo-950/40 to-slate-900/90 p-4 sm:p-5 shadow-xl shadow-indigo-950/50 backdrop-blur-md">
+      {/* Decorative ambient glow */}
+      <div className="absolute -top-12 -right-12 w-48 h-48 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute -bottom-12 -left-12 w-48 h-48 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
+
+      <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        {/* Left: Indicator Info */}
+        <div className="space-y-1.5 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-red-500/20 text-red-400 border border-red-500/30">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
+              {upcoming.impact} IMPACT
+            </span>
+            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+              {upcoming.event_code}
+            </span>
+            <span className="text-[11px] text-slate-400 font-mono">
+              NEXT HIGH-IMPACT RELEASE
+            </span>
+          </div>
+
+          <h3 className="text-lg sm:text-xl font-black text-white tracking-tight truncate">
+            {upcoming.event_name}
+          </h3>
+
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-300">
+            <span className="flex items-center gap-1.5 font-medium text-slate-200">
+              <Calendar className="w-3.5 h-3.5 text-indigo-400" />
+              {timing.dateFormatted}
+            </span>
+            <span className="flex items-center gap-1.5 font-mono text-cyan-300">
+              <Clock className="w-3.5 h-3.5 text-cyan-400" />
+              {timing.timeNy} (NY) • {timing.timeLocal} (Local)
+            </span>
+          </div>
+
+          {/* Affected pairs */}
+          <div className="flex items-center gap-1.5 pt-1 flex-wrap">
+            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Affected Pairs:</span>
+            {pairs.map((p, idx) => (
+              <span key={idx} className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-white/5 text-slate-200 border border-white/10">
+                {p}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* Right: Big Countdown Clock & Direct Analyze Action */}
+        <div className="flex flex-row sm:flex-col lg:flex-row items-center gap-3 sm:gap-4 flex-shrink-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-white/10">
+          <div className="text-left sm:text-right">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Live Release Countdown</p>
+            <p className="text-xl sm:text-2xl font-black font-mono tracking-tight text-white flex items-center gap-2">
+              <span className={timing.isPassed ? 'text-slate-400' : timing.urgency === 'imminent' ? 'text-red-400 animate-pulse' : timing.urgency === 'soon' ? 'text-amber-400' : 'text-emerald-400'}>
+                {timing.countdownText}
+              </span>
+            </p>
+          </div>
+
+          <button
+            onClick={() => onAnalyze(upcoming.event_code)}
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-xs transition-all shadow-lg shadow-indigo-600/30 active:scale-95 whitespace-nowrap ml-auto sm:ml-0"
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-300" />
+            Analyze News
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Red-Folder Calendar Event Card ────────────────────────────────────────────
+function CalendarEventCard({
+  ev,
+  onAnalyze,
+  now
+}: {
+  ev: CalendarEvent
+  onAnalyze: (code: string) => void
+  now: number
+}) {
+  const timing = getEventTiming(ev.release_time_utc, now)
+  const pairs = EVENT_AFFECTED_PAIRS[ev.event_code] || ['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500']
+
+  return (
+    <div className="glass p-5 border border-white/10 hover:border-indigo-500/30 transition-all rounded-2xl relative overflow-hidden bg-slate-900/60">
+      {/* Top row: Badges & Live Countdown */}
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full border ${
+            ev.impact.toUpperCase() === 'HIGH'
+              ? 'bg-red-500/20 text-red-400 border-red-500/30'
+              : 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+          }`}>
+            {ev.impact} IMPACT
+          </span>
+          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            {ev.currency || 'USD'}
+          </span>
+          <span className="text-[11px] font-mono font-bold text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
+            {ev.event_code}
+          </span>
+        </div>
+
+        {/* Live Countdown Badge */}
+        <CountdownBadge releaseTimeUtc={ev.release_time_utc} now={now} />
+      </div>
+
+      {/* Event Title */}
+      <h4 className="text-lg font-bold text-white mb-2 tracking-tight">
+        {ev.event_name}
+      </h4>
+
+      {/* Date & Exact Time Display */}
+      <div className="glass-sm p-3 rounded-xl border border-white/5 mb-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+        <div className="flex items-center gap-2 text-slate-300">
+          <Calendar className="w-4 h-4 text-indigo-400 flex-shrink-0" />
+          <div>
+            <p className="text-[10px] text-slate-500 uppercase font-semibold">Exact Date</p>
+            <p className="font-semibold text-slate-200">{timing.dateFormatted}</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 text-slate-300">
+          <Clock className="w-4 h-4 text-cyan-400 flex-shrink-0" />
+          <div>
+            <p className="text-[10px] text-slate-500 uppercase font-semibold">Exact Release Time</p>
+            <p className="font-mono font-bold text-cyan-300">
+              {timing.timeNy} <span className="text-slate-400 font-normal">NY</span> • {timing.timeLocal} <span className="text-slate-400 font-normal">Local</span>
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Pairs to be Affected */}
+      <div className="mb-4">
+        <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
+          Pairs to be Affected:
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {pairs.map((pair, idx) => (
+            <span
+              key={idx}
+              className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg bg-indigo-950/50 text-indigo-300 border border-indigo-500/25"
+            >
+              {pair}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Forecast & Previous Metrics + Action button */}
+      <div className="flex flex-wrap items-center justify-between gap-4 pt-3 border-t border-white/5">
+        <div className="flex items-center gap-5">
+          <div>
+            <p className="text-[10px] text-slate-500 uppercase font-semibold">Forecast</p>
+            <p className="text-sm font-mono font-bold text-slate-200">{ev.forecast ?? '—'}</p>
+          </div>
+          <div>
+            <p className="text-[10px] text-slate-500 uppercase font-semibold">Previous</p>
+            <p className="text-sm font-mono font-bold text-slate-400">{ev.previous ?? '—'}</p>
+          </div>
+          {ev.actual != null && (
+            <div>
+              <p className="text-[10px] text-emerald-400 uppercase font-bold">Actual</p>
+              <p className="text-sm font-mono font-bold text-emerald-300">{ev.actual}</p>
+            </div>
+          )}
+        </div>
+
+        <button
+          onClick={() => onAnalyze(ev.event_code)}
+          className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-md shadow-indigo-600/20 flex items-center gap-2 active:scale-95"
+        >
+          <Zap className="w-3.5 h-3.5 text-amber-300" />
+          Analyze {ev.event_code} News & Signals
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [activeTab, setActiveTab] = useState<'predictions' | 'calendar' | 'accuracy' | 'telegram'>('predictions')
@@ -397,6 +961,13 @@ export default function App() {
   const [selectedEventCode, setSelectedEventCode] = useState<string | null>(null)
   const [analyzingCode, setAnalyzingCode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [now, setNow] = useState<number>(Date.now())
+
+  // Dynamic 1-second clock ticker for real-time live countdowns
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   const handleAnalyzeEvent = async (eventCode: string) => {
     setSelectedEventCode(eventCode)
@@ -527,7 +1098,7 @@ export default function App() {
 
   return (
     <div className="bg-ambient min-h-screen text-slate-100">
-      <div className="max-w-4xl mx-auto px-4 py-8">
+      <div className="max-w-5xl mx-auto px-3 sm:px-6 py-6 sm:py-8">
 
         {/* ── Top Header ── */}
         <header className="mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-white/5 pb-6">
@@ -584,120 +1155,115 @@ export default function App() {
           </div>
         )}
 
+        {/* ── Next Major Red-Folder News Radar Banner ── */}
+        <NextEventRadar
+          events={calendarEvents}
+          onAnalyze={handleAnalyzeEvent}
+          now={now}
+        />
+
         {/* ── Navigation Tabs ── */}
-        <div className="flex items-center gap-2 mb-6 border-b border-white/10 pb-2 overflow-x-auto">
+        <div className="flex items-center gap-1 mb-6 border-b border-white/10 pb-2 overflow-x-auto no-scrollbar">
           <button
             onClick={() => setActiveTab('predictions')}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
               activeTab === 'predictions'
                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            <Zap className="w-4 h-4" />
-            Live Predictions ({predictions.length})
+            <Zap className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            <span>Signals</span>
+            <span className="hidden sm:inline">({predictions.length})</span>
           </button>
 
           <button
             onClick={() => { setActiveTab('calendar'); fetchCalendar() }}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
               activeTab === 'calendar'
                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            <Calendar className="w-4 h-4" />
-            Red-Folder Calendar ({calendarEvents.length})
+            <Calendar className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            <span className="hidden xs:inline">Calendar</span>
+            <span className="hidden sm:inline">({calendarEvents.length})</span>
           </button>
 
           <button
             onClick={() => { setActiveTab('accuracy'); fetchHistory() }}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
               activeTab === 'accuracy'
                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            <Award className="w-4 h-4" />
-            Accuracy & History ({accuracy?.overall_hit_rate ?? 0}% Win Rate)
+            <Award className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            <span>Accuracy</span>
+            <span className="hidden sm:inline"> ({accuracy?.overall_hit_rate ?? 0}%)</span>
           </button>
 
           <button
             onClick={() => setActiveTab('telegram')}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
               activeTab === 'telegram'
                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            <Bell className="w-4 h-4" />
-            Telegram & Scheduler
+            <Bell className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            <span className="hidden xs:inline">Telegram</span>
           </button>
         </div>
 
         {/* ── TAB 1: PREDICTIONS ── */}
         {activeTab === 'predictions' && (
           <div>
-            <div className="flex flex-wrap gap-3 mb-6">
+            {/* Action Buttons - fully responsive */}
+            <div className="flex flex-col sm:flex-row gap-3 mb-6">
               <button
                 onClick={runAll}
                 disabled={runningAll}
-                className="flex-1 min-w-[200px] flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold py-3 px-4 rounded-xl transition-all active:scale-95 shadow-lg shadow-indigo-600/20"
+                className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold py-3 px-4 rounded-xl transition-all active:scale-95 shadow-lg shadow-indigo-600/20"
               >
                 <Zap className={`w-4 h-4 ${runningAll ? 'animate-pulse' : ''}`} />
-                {runningAll ? 'Recalculating all macro indicators…' : 'Run All Predictions'}
+                {runningAll ? 'Recalculating…' : 'Run All Predictions'}
               </button>
 
-              <button
-                onClick={broadcastAllTelegram}
-                disabled={broadcastingTg}
-                className="flex items-center justify-center gap-2 bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-300 font-bold py-3 px-5 rounded-xl transition-all active:scale-95 shadow-lg shadow-cyan-600/10"
-              >
-                {broadcastingTg ? (
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                ) : broadcastSent ? (
-                  <CheckCircle className="w-4 h-4 text-emerald-400" />
-                ) : (
-                  <Bell className="w-4 h-4" />
-                )}
-                {broadcastSent ? 'Signals Sent!' : 'Send to Telegram'}
-              </button>
-
-              <button
-                onClick={fetchPredictions}
-                title="Refresh predictions"
-                className="p-3 glass-sm hover:bg-white/10 rounded-xl transition-all active:scale-95 border border-white/10"
-              >
-                <RefreshCw className="w-4 h-4 text-slate-400" />
-              </button>
-            </div>
-
-            {/* ── Event Filter Pills ── */}
-            <div className="flex items-center gap-1.5 mb-5 overflow-x-auto pb-1.5 no-scrollbar">
-              <button
-                onClick={() => setSelectedEventCode(null)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold font-mono transition-all whitespace-nowrap ${
-                  selectedEventCode === null
-                    ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
-                    : 'glass-sm text-slate-400 hover:text-white'
-                }`}
-              >
-                All Events ({predictions.length})
-              </button>
-              {health?.supported_events.map(code => (
+              <div className="flex gap-2">
                 <button
-                  key={code}
-                  onClick={() => setSelectedEventCode(code)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold font-mono transition-all whitespace-nowrap ${
-                    selectedEventCode === code
-                      ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 border border-indigo-400/40'
-                      : 'glass-sm text-slate-400 hover:text-white'
-                  }`}
+                  onClick={broadcastAllTelegram}
+                  disabled={broadcastingTg}
+                  className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-300 font-bold py-3 px-4 rounded-xl transition-all active:scale-95"
                 >
-                  {code}
+                  {broadcastingTg ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : broadcastSent ? (
+                    <CheckCircle className="w-4 h-4 text-emerald-400" />
+                  ) : (
+                    <Bell className="w-4 h-4" />
+                  )}
+                  <span className="hidden sm:inline">{broadcastSent ? 'Sent!' : 'Send All to Telegram'}</span>
+                  <span className="sm:hidden">{broadcastSent ? 'Sent!' : 'Telegram'}</span>
                 </button>
-              ))}
+
+                <button
+                  onClick={fetchPredictions}
+                  title="Refresh predictions"
+                  className="p-3 glass-sm hover:bg-white/10 rounded-xl transition-all active:scale-95 border border-white/10 flex-shrink-0"
+                >
+                  <RefreshCw className="w-4 h-4 text-slate-400" />
+                </button>
+              </div>
             </div>
+
+            {/* ── Event Filter Dropdown ── */}
+            <EventFilterDropdown
+              events={health?.supported_events ?? []}
+              selected={selectedEventCode}
+              onSelect={setSelectedEventCode}
+              totalCount={predictions.length}
+            />
 
             {/* ── Focused Single-Event Banner ── */}
             {selectedEventCode && (
@@ -754,7 +1320,7 @@ export default function App() {
               </div>
             )}
 
-            <div className={`grid gap-4 ${selectedEventCode ? 'grid-cols-1 max-w-2xl mx-auto' : 'grid-cols-1 md:grid-cols-2'}`}>
+            <div className={`grid gap-4 ${selectedEventCode ? 'grid-cols-1 max-w-2xl mx-auto' : 'grid-cols-1 lg:grid-cols-2'}`}>
               <AnimatePresence>
                 {(selectedEventCode
                   ? predictions.filter(p => p.event_code === selectedEventCode)
@@ -763,6 +1329,8 @@ export default function App() {
                   <PredictionCard
                     key={pred.id}
                     pred={pred}
+                    calendarEvent={calendarEvents.find(c => c.event_code === pred.event_code)}
+                    now={now}
                     onRefresh={runPrediction}
                     onSendTelegram={sendSingleToTelegram}
                   />
@@ -777,14 +1345,19 @@ export default function App() {
           <div className="space-y-4">
             <div className="flex items-center justify-between mb-2">
               <div>
-                <h3 className="text-base font-bold text-white">This Week's High-Impact Releases</h3>
-                <p className="text-xs text-slate-400">Forex Factory Live Feed with automated 2-hour pre-release alerting</p>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
+                  This Week's High-Impact Releases
+                </h3>
+                <p className="text-xs text-slate-400">Forex Factory Live Feed with exact release times, live countdowns, and affected asset pairs</p>
               </div>
               <button
                 onClick={fetchCalendar}
-                className="p-2 rounded-xl glass-sm hover:bg-white/10 text-slate-400 hover:text-white transition-all"
+                className="p-2 rounded-xl glass-sm hover:bg-white/10 text-slate-400 hover:text-white transition-all flex items-center gap-1.5 text-xs font-semibold"
+                title="Refresh calendar"
               >
-                <RefreshCw className="w-4 h-4" />
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Refresh</span>
               </button>
             </div>
 
@@ -794,45 +1367,12 @@ export default function App() {
               </div>
             ) : (
               calendarEvents.map((ev, idx) => (
-                <div key={idx} className="glass p-5 border border-white/5 hover:border-white/15 transition-all">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30">
-                          {ev.impact} IMPACT
-                        </span>
-                        <span className="text-xs font-mono text-slate-400">
-                          {ev.release_time_utc ? new Date(ev.release_time_utc).toLocaleString() : 'TBD'}
-                        </span>
-                      </div>
-                      <h4 className="text-base font-bold text-white">{ev.event_name}</h4>
-                    </div>
-
-                    <div className="flex items-center gap-6">
-                      <div className="text-right">
-                        <p className="text-[10px] text-slate-500 uppercase">Forecast</p>
-                        <p className="text-sm font-mono font-bold text-slate-200">{ev.forecast ?? '—'}</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-[10px] text-slate-500 uppercase">Previous</p>
-                        <p className="text-sm font-mono font-bold text-slate-400">{ev.previous ?? '—'}</p>
-                      </div>
-                      {ev.actual != null && (
-                        <div className="text-right">
-                          <p className="text-[10px] text-emerald-500 uppercase font-bold">Actual</p>
-                          <p className="text-sm font-mono font-bold text-emerald-400">{ev.actual}</p>
-                        </div>
-                      )}
-                      <button
-                        onClick={() => handleAnalyzeEvent(ev.event_code)}
-                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold transition-all shadow-md shadow-indigo-600/20 flex items-center gap-1.5 active:scale-95"
-                      >
-                        <Zap className="w-3.5 h-3.5 text-amber-300" />
-                        Analyze {ev.event_code}
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                <CalendarEventCard
+                  key={idx}
+                  ev={ev}
+                  onAnalyze={handleAnalyzeEvent}
+                  now={now}
+                />
               ))
             )}
           </div>
