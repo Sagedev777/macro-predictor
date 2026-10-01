@@ -12,18 +12,23 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from database import init_db, SessionLocal, Prediction as PredictionModel, AlertLog, Release
 from indicators import build_composite_score
-from calendar_feed import fetch_upcoming_red_folder_events
+from calendar_feed import fetch_upcoming_red_folder_events, update_event_actual
 from alerts import send_telegram_alert, send_test_message
-from config.events import EVENTS
-from scheduler import start_scheduler, stop_scheduler, check_and_alert_upcoming
+from config.events import EVENTS, get_event_config
+from scheduler import start_scheduler, stop_scheduler, check_and_alert_upcoming, grade_prediction, send_outcome_alert
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("api")
+import time
+
+_api_pred_cache: dict[str, tuple[float, dict]] = {}
+_API_PRED_TTL = 600  # 10 minutes cache
 
 app = FastAPI(title="MacroPredictor API", version="2.5.0")
 
@@ -196,27 +201,281 @@ def health():
 
 
 @app.get("/api/events")
-def get_upcoming_events():
-    """Return upcoming high-impact events from Forex Factory with release times."""
-    events = fetch_upcoming_red_folder_events()
+def get_upcoming_events(force_refresh: bool = False):
+    """
+    Return upcoming high-impact events from Forex Factory with exact release times,
+    simultaneous release annotations, and automatically computed model predictions.
+    Set ?force_refresh=true to bypass cache and pull the live feed immediately.
+    """
+    events = fetch_upcoming_red_folder_events(force_refresh=force_refresh)
+    return _get_events_body(events)
+
+
+@app.post("/api/events/sync-actuals")
+def sync_actuals_from_feed():
+    """
+    Force a live refresh of the Forex Factory feed to auto-detect newly published
+    actual values. Any event that now has an actual print will be automatically
+    graded against its pre-release model prediction. No manual input needed.
+    """
+    events = fetch_upcoming_red_folder_events(force_refresh=True)
+    graded = []
+    db = SessionLocal()
+    try:
+        for ev in events:
+            code = ev.get("event_code")
+            actual = ev.get("actual")
+            forecast = ev.get("forecast")
+
+            if not code or actual is None or forecast is None:
+                continue
+
+            event_cfg = get_event_config(code)
+
+            # Check if this event already has a graded prediction
+            existing_graded = db.query(PredictionModel).filter(
+                PredictionModel.event_code == code,
+                PredictionModel.was_correct != None,
+                PredictionModel.actual == actual,
+            ).first()
+
+            if existing_graded:
+                continue  # Already graded with this exact actual — skip
+
+            # Find the most recent ungraded prediction
+            pred = (
+                db.query(PredictionModel)
+                .filter(
+                    PredictionModel.event_code == code,
+                    PredictionModel.was_correct == None,
+                )
+                .order_by(PredictionModel.created_at.desc())
+                .first()
+            )
+
+            if not pred:
+                # No ungraded prediction exists — create one from the model now
+                try:
+                    comp = build_composite_score(code)
+                    pred = PredictionModel(
+                        event_code=code,
+                        event_display_name=event_cfg.get("display_name", code),
+                        composite_score=comp["composite_score"],
+                        lean_direction=comp["lean_direction"],
+                        confidence_pct=comp["confidence_pct"],
+                        indicator_breakdown=json.dumps(comp["indicator_breakdown"]),
+                    )
+                    db.add(pred)
+                    db.commit()
+                    db.refresh(pred)
+                except Exception as e:
+                    log.warning("Could not create prediction for %s: %s", code, e)
+                    continue
+
+            # Grade it
+            was_correct, verdict_msg = grade_prediction(code, pred.lean_direction, actual, forecast)
+            surprise = round(actual - forecast, 4)
+
+            pred.actual = actual
+            pred.forecast = forecast
+            pred.surprise = surprise
+            pred.actual_surprise = surprise
+            pred.was_correct = was_correct
+            db.commit()
+
+            # Send Telegram outcome alert (de-duplicated via AlertLog)
+            try:
+                rel_str = ev.get("release_time_utc", "")
+                post_sent = db.query(AlertLog).filter(
+                    AlertLog.event_code == code,
+                    AlertLog.release_time_str == rel_str,
+                    AlertLog.alert_type == "POST_RELEASE",
+                ).first()
+                if not post_sent:
+                    send_outcome_alert(code, actual, forecast, was_correct, pred.lean_direction, verdict_explanation=verdict_msg)
+                    db.add(AlertLog(event_code=code, release_time_str=rel_str, alert_type="POST_RELEASE"))
+                    db.commit()
+            except Exception as te:
+                log.warning("Telegram outcome alert failed for %s: %s", code, te)
+
+            graded.append({
+                "event_code": code,
+                "display_name": event_cfg.get("display_name", code),
+                "actual": actual,
+                "forecast": forecast,
+                "surprise": surprise,
+                "was_correct": was_correct,
+            })
+            log.info("Auto-graded %s: actual=%s forecast=%s correct=%s", code, actual, forecast, was_correct)
+
+        return {
+            "success": True,
+            "synced_events": len(events),
+            "newly_graded": len(graded),
+            "graded": graded,
+        }
+    finally:
+        db.close()
+
+
+def _get_events_body(events: list) -> dict:
+    """Shared logic: annotate events with simultaneous flags and predictions."""
+
+    # Group by release_time_utc to identify simultaneous releases
+    time_groups = {}
+    for ev in events:
+        t_str = ev.get("release_time_utc")
+        if t_str:
+            time_groups.setdefault(t_str, []).append(ev)
+
     for ev in events:
         code = ev.get("event_code")
-        if code and code in EVENTS:
-            ev["trade_signals"] = EVENTS[code].get("trade_signals", {})
-            ev["display_name"]  = EVENTS[code].get("display_name", code)
-            ev["currency"]      = EVENTS[code].get("currency", "USD")
+        t_str = ev.get("release_time_utc")
+
+        # Annotate simultaneous release info
+        simultaneous = [e for e in time_groups.get(t_str, []) if e.get("event_code") != code]
+        ev["is_simultaneous"] = len(simultaneous) > 0
+        ev["simultaneous_event_codes"] = [e.get("event_code") for e in simultaneous]
+        ev["simultaneous_event_names"] = [e.get("event_name") for e in simultaneous]
+
+        if code:
+            cfg = get_event_config(code)
+            ev["display_name"] = cfg.get("display_name", ev.get("event_name", code))
+            ev["currency"]     = cfg.get("currency", "USD")
+
+            # Attach model prediction for this event (cached for 10 min)
+            now_ts = time.time()
+            if code in _api_pred_cache and (now_ts - _api_pred_cache[code][0]) < _API_PRED_TTL:
+                ev["prediction"] = _api_pred_cache[code][1]
+            else:
+                try:
+                    pred = build_composite_score(code)
+                    direction = pred["lean_direction"]
+                    dir_key = "BULLISH" if direction in ("BEAT", "BULLISH") else ("BEARISH" if direction in ("MISS", "BEARISH") else "INLINE")
+
+                    pred_data = {
+                        "lean_direction":  direction,
+                        "confidence_pct":  pred["confidence_pct"],
+                        "composite_score": pred["composite_score"],
+                        "event_label":     cfg.get("event_labels", {}).get(dir_key, direction),
+                        "explanation":     cfg.get("explanations", {}).get(dir_key, ""),
+                        "trade_signals":   cfg.get("trade_signals", {}).get(dir_key, []),
+                        "indicators":      pred["indicator_breakdown"],
+                    }
+                    _api_pred_cache[code] = (now_ts, pred_data)
+                    ev["prediction"] = pred_data
+                except Exception as e:
+                    log.warning("Could not compute prediction for %s: %s", code, e)
+                    ev["prediction"] = None
+
     return {"count": len(events), "events": events}
+
+
+class RecordActualPayload(BaseModel):
+    event_code: Optional[str] = None
+    event_name: Optional[str] = None
+    actual: float
+    forecast: Optional[float] = None
+
+
+@app.post("/api/events/record-actual")
+def record_actual_api(payload: RecordActualPayload):
+    """
+    Record an actual release print, update calendar caches, and grade
+    the model's prediction directly into the honest historical ledger.
+    """
+    code = payload.event_code.upper() if payload.event_code else None
+
+    # 1. Update calendar feed cache (in-memory and disk)
+    update_event_actual(code, payload.actual, payload.event_name)
+
+    if not code:
+        return {
+            "success": True,
+            "event_code": code,
+            "event_name": payload.event_name,
+            "actual": payload.actual,
+            "message": "Recorded actual print in calendar cache."
+        }
+
+    event_cfg = get_event_config(code)
+
+    # 2. Find or calculate pre-release prediction
+    db = SessionLocal()
+    try:
+        pred = (
+            db.query(PredictionModel)
+            .filter(
+                PredictionModel.event_code == code,
+                PredictionModel.was_correct == None
+            )
+            .order_by(PredictionModel.created_at.desc())
+            .first()
+        )
+
+        if not pred:
+            # Generate pre-release model prediction if not already in DB
+            comp = build_composite_score(code)
+            pred = PredictionModel(
+                event_code=code,
+                event_display_name=event_cfg.get("display_name", code),
+                composite_score=comp["composite_score"],
+                lean_direction=comp["lean_direction"],
+                confidence_pct=comp["confidence_pct"],
+                indicator_breakdown=json.dumps(comp["indicator_breakdown"]),
+            )
+            db.add(pred)
+            db.commit()
+            db.refresh(pred)
+
+        # 3. Determine forecast
+        forecast = payload.forecast
+        if forecast is None:
+            for ev in fetch_upcoming_red_folder_events():
+                if ev.get("event_code") == code and ev.get("forecast") is not None:
+                    forecast = ev.get("forecast")
+                    break
+        if forecast is None:
+            forecast = pred.forecast or 0.0
+
+        # 4. Strict mathematical evaluation
+        was_correct, verdict_msg = grade_prediction(code, pred.lean_direction, payload.actual, forecast)
+        surprise = round(payload.actual - forecast, 4)
+
+        pred.actual = payload.actual
+        pred.forecast = forecast
+        pred.surprise = surprise
+        pred.actual_surprise = surprise
+        pred.was_correct = was_correct
+        db.commit()
+
+        # 5. Send outcome alert to Telegram
+        try:
+            send_outcome_alert(code, payload.actual, forecast, was_correct, pred.lean_direction, verdict_explanation=verdict_msg)
+        except Exception as te:
+            log.warning("Could not send Telegram outcome alert: %s", te)
+
+        return {
+            "success": True,
+            "event_code": code,
+            "display_name": pred.event_display_name,
+            "actual": payload.actual,
+            "forecast": forecast,
+            "surprise": surprise,
+            "lean_direction": pred.lean_direction,
+            "was_correct": was_correct,
+            "verdict": verdict_msg,
+        }
+    finally:
+        db.close()
+
 
 
 @app.get("/api/prediction/{event_code}")
 def get_prediction(event_code: str, send_alert: bool = False):
     """Run the indicator engine for a specific event and return the prediction."""
     code = event_code.upper()
-    if code not in EVENTS:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Unknown event '{code}'. Valid: {list(EVENTS.keys())}"
-        )
+    cfg = get_event_config(code)
 
     try:
         result = build_composite_score(code)
@@ -225,17 +484,18 @@ def get_prediction(event_code: str, send_alert: bool = False):
         raise HTTPException(status_code=500, detail=str(e))
 
     direction = result["lean_direction"]
+    dir_key = "BULLISH" if direction in ("BEAT", "BULLISH") else ("BEARISH" if direction in ("MISS", "BEARISH") else "INLINE")
     trade_signals = (
-        EVENTS[code].get("trade_signals", {}).get(direction)
-        or EVENTS[code].get("trade_signals", {}).get("BULLISH" if direction == "BEAT" else "BEARISH", [])
+        cfg.get("trade_signals", {}).get(direction)
+        or cfg.get("trade_signals", {}).get(dir_key, [])
     )
     event_label = (
-        EVENTS[code].get("event_labels", {}).get(direction)
-        or EVENTS[code].get("event_labels", {}).get("BULLISH" if direction == "BEAT" else "BEARISH", direction)
+        cfg.get("event_labels", {}).get(direction)
+        or cfg.get("event_labels", {}).get(dir_key, direction)
     )
     explanation = (
-        EVENTS[code].get("explanations", {}).get(direction)
-        or EVENTS[code].get("explanations", {}).get("BULLISH" if direction == "BEAT" else "BEARISH", "")
+        cfg.get("explanations", {}).get(direction)
+        or cfg.get("explanations", {}).get(dir_key, "")
     )
     result["trade_signals"] = trade_signals
     result["event_label"] = event_label
@@ -245,7 +505,7 @@ def get_prediction(event_code: str, send_alert: bool = False):
     db = SessionLocal()
     pred = PredictionModel(
         event_code=code,
-        event_display_name=EVENTS[code]["display_name"],
+        event_display_name=cfg.get("display_name", code),
         composite_score=result["composite_score"],
         lean_direction=result["lean_direction"],
         confidence_pct=result["confidence_pct"],
@@ -291,40 +551,51 @@ def run_all_predictions(send_alerts: bool = False):
 
 
 @app.get("/api/predictions")
-def list_predictions(limit: int = 20):
-    """Return the most recent stored predictions from the DB."""
+def list_predictions(limit: int = 30):
+    """Return the most recent stored predictions from the DB (one latest prediction per event)."""
     db = SessionLocal()
-    preds = (
+    all_preds = (
         db.query(PredictionModel)
         .order_by(PredictionModel.created_at.desc())
-        .limit(limit)
         .all()
     )
     db.close()
 
+    seen_codes = set()
+    preds = []
+    for p in all_preds:
+        if p.event_code not in seen_codes:
+            seen_codes.add(p.event_code)
+            preds.append(p)
+            if len(preds) >= limit:
+                break
+
+    predictions_data = []
+    for p in preds:
+        cfg = get_event_config(p.event_code)
+        dir_key = "BULLISH" if p.lean_direction in ("BEAT", "BULLISH") else ("BEARISH" if p.lean_direction in ("MISS", "BEARISH") else "INLINE")
+        predictions_data.append({
+            "id":               p.id,
+            "event_code":       p.event_code,
+            "display_name":     p.event_display_name or cfg.get("display_name", p.event_code),
+            "lean_direction":   p.lean_direction,
+            "event_label":      cfg.get("event_labels", {}).get(p.lean_direction) or cfg.get("event_labels", {}).get(dir_key, p.lean_direction),
+            "explanation":      cfg.get("explanations", {}).get(p.lean_direction) or cfg.get("explanations", {}).get(dir_key, ""),
+            "confidence_pct":   p.confidence_pct,
+            "composite_score":  p.composite_score,
+            "trade_signals":    cfg.get("trade_signals", {}).get(p.lean_direction) or cfg.get("trade_signals", {}).get(dir_key, []),
+            "created_at":       p.created_at.isoformat() if p.created_at else None,
+            "was_correct":      p.was_correct,
+            "actual_surprise":  p.actual_surprise,
+            "forecast":         p.forecast,
+            "actual":           p.actual,
+            "indicator_breakdown": json.loads(p.indicator_breakdown) if p.indicator_breakdown else [],
+            "indicators":       json.loads(p.indicator_breakdown) if p.indicator_breakdown else [],
+        })
+
     return {
-        "count": len(preds),
-        "predictions": [
-            {
-                "id":               p.id,
-                "event_code":       p.event_code,
-                "display_name":     p.event_display_name,
-                "lean_direction":   p.lean_direction,
-                "event_label":      EVENTS.get(p.event_code, {}).get("event_labels", {}).get(p.lean_direction) or EVENTS.get(p.event_code, {}).get("event_labels", {}).get("BULLISH" if p.lean_direction == "BEAT" else "BEARISH", p.lean_direction),
-                "explanation":      EVENTS.get(p.event_code, {}).get("explanations", {}).get(p.lean_direction) or EVENTS.get(p.event_code, {}).get("explanations", {}).get("BULLISH" if p.lean_direction == "BEAT" else "BEARISH", ""),
-                "confidence_pct":   p.confidence_pct,
-                "composite_score":  p.composite_score,
-                "trade_signals":    EVENTS.get(p.event_code, {}).get("trade_signals", {}).get(p.lean_direction) or EVENTS.get(p.event_code, {}).get("trade_signals", {}).get("BULLISH" if p.lean_direction == "BEAT" else "BEARISH", []),
-                "created_at":       p.created_at.isoformat() if p.created_at else None,
-                "was_correct":      p.was_correct,
-                "actual_surprise":  p.actual_surprise,
-                "forecast":         p.forecast,
-                "actual":           p.actual,
-                "indicator_breakdown": json.loads(p.indicator_breakdown) if p.indicator_breakdown else [],
-                "indicators":       json.loads(p.indicator_breakdown) if p.indicator_breakdown else [],
-            }
-            for p in preds
-        ],
+        "count": len(predictions_data),
+        "predictions": predictions_data,
     }
 
 
@@ -462,3 +733,10 @@ def broadcast_all_to_telegram():
 def test_telegram():
     ok = send_test_message()
     return {"success": ok}
+
+
+# ── Serve React frontend (MUST be last — catches all non-API routes) ──────────
+_dist = os.path.join(os.path.dirname(__file__), "dist")
+if os.path.isdir(_dist):
+    app.mount("/", StaticFiles(directory=_dist, html=True), name="static")
+

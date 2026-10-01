@@ -16,17 +16,26 @@ const INVERSE_EVENTS = new Set(['JOBLESS_CLAIMS', 'UNEMPLOYMENT_RATE'])
 
 // Mapping of currency pairs and assets directly affected by each event
 const EVENT_AFFECTED_PAIRS: Record<string, string[]> = {
-  NFP: ['EUR/USD', 'USD/JPY', 'GBP/USD', 'XAU/USD', 'US500'],
-  CPI: ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD', 'US500'],
-  CORE_CPI: ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD'],
-  PPI: ['EUR/USD', 'USD/JPY', 'XAU/USD'],
-  JOBLESS_CLAIMS: ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD'],
-  UNEMPLOYMENT_RATE: ['EUR/USD', 'USD/JPY', 'GBP/USD', 'XAU/USD'],
-  GDP: ['EUR/USD', 'USD/JPY', 'US500', 'XAU/USD'],
-  FOMC: ['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500', 'US30'],
-  RETAIL_SALES: ['EUR/USD', 'USD/JPY', 'US30', 'XAU/USD'],
-  ISM_MFG: ['USD/JPY', 'EUR/USD', 'US30'],
-  CONSUMER_CONFIDENCE: ['EUR/USD', 'USD/JPY', 'US500'],
+  NFP:                ['EUR/USD', 'USD/JPY', 'GBP/USD', 'XAU/USD', 'US500'],
+  CPI:                ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD', 'US500'],
+  CORE_CPI:           ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD'],
+  PPI:                ['EUR/USD', 'USD/JPY', 'XAU/USD'],
+  CORE_PPI:           ['EUR/USD', 'USD/JPY', 'XAU/USD'],
+  JOBLESS_CLAIMS:     ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD'],
+  UNEMPLOYMENT_RATE:  ['EUR/USD', 'USD/JPY', 'GBP/USD', 'XAU/USD'],
+  GDP:                ['EUR/USD', 'USD/JPY', 'US500', 'XAU/USD'],
+  FOMC:               ['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500', 'US30'],
+  RETAIL_SALES:       ['EUR/USD', 'USD/JPY', 'US30', 'XAU/USD'],
+  CORE_RETAIL_SALES:  ['EUR/USD', 'USD/JPY', 'XAU/USD'],
+  ISM_MFG:            ['USD/JPY', 'EUR/USD', 'US30'],
+  ISM_SERVICES:       ['USD/JPY', 'EUR/USD', 'US30', 'XAU/USD'],
+  CONSUMER_CONFIDENCE:['EUR/USD', 'USD/JPY', 'US500'],
+  CORE_PCE:           ['EUR/USD', 'USD/JPY', 'XAU/USD', 'GBP/USD', 'US500'],
+  PCE:                ['EUR/USD', 'USD/JPY', 'XAU/USD'],
+  ADP_NFP:            ['EUR/USD', 'USD/JPY', 'GBP/USD', 'XAU/USD'],
+  AVG_HOURLY_EARNINGS:['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500'],
+  JOLTS:              ['EUR/USD', 'USD/JPY', 'XAU/USD'],
+  BUILDING_PERMITS:   ['USD/CAD', 'EUR/USD', 'US500'],
 }
 
 interface EventTiming {
@@ -142,12 +151,32 @@ function getEventTiming(releaseTimeUtc: string, now: number): EventTiming {
   }
 }
 
+type DateScope = 'today' | 'week' | 'all'
+
+function matchesDateScope(releaseTimeUtc: string | undefined, scope: DateScope, now: number): boolean {
+  if (scope === 'all') return true
+  if (!releaseTimeUtc) return false
+
+  const releaseTime = new Date(releaseTimeUtc)
+  if (Number.isNaN(releaseTime.getTime())) return false
+
+  const start = new Date(now)
+  start.setHours(0, 0, 0, 0)
+  if (scope === 'week') {
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7))
+  }
+
+  const end = new Date(start)
+  end.setDate(end.getDate() + (scope === 'today' ? 1 : 7))
+  return releaseTime >= start && releaseTime < end
+}
+
 function CountdownBadge({ releaseTimeUtc, now }: { releaseTimeUtc: string; now: number }) {
   const timing = getEventTiming(releaseTimeUtc, now)
 
   if (timing.urgency === 'imminent') {
     return (
-      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-black bg-red-500/25 text-red-300 border border-red-500 animate-pulse shadow-lg shadow-red-500/30">
+      <span className="inline-flex max-w-full items-center gap-1.5 whitespace-normal px-3 py-1 rounded-full text-xs font-mono font-black bg-red-500/25 text-red-300 border border-red-500 animate-pulse shadow-lg shadow-red-500/30">
         <span className="w-2 h-2 rounded-full bg-red-400 animate-ping" />
         🚨 IMMINENT: {timing.countdownText}
       </span>
@@ -156,7 +185,7 @@ function CountdownBadge({ releaseTimeUtc, now }: { releaseTimeUtc: string; now: 
 
   if (timing.urgency === 'soon') {
     return (
-      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse shadow-md shadow-amber-500/20">
+      <span className="inline-flex max-w-full items-center gap-1.5 whitespace-normal px-3 py-1 rounded-full text-xs font-mono font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse shadow-md shadow-amber-500/20">
         <Clock className="w-3.5 h-3.5 text-amber-400" />
         ⚠️ SOON: {timing.countdownText}
       </span>
@@ -165,7 +194,7 @@ function CountdownBadge({ releaseTimeUtc, now }: { releaseTimeUtc: string; now: 
 
   if (timing.urgency === 'today') {
     return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+      <span className="inline-flex max-w-full items-center gap-1.5 whitespace-normal px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
         <Clock className="w-3.5 h-3.5 text-indigo-400" />
         ⏳ TODAY: {timing.countdownText}
       </span>
@@ -174,7 +203,7 @@ function CountdownBadge({ releaseTimeUtc, now }: { releaseTimeUtc: string; now: 
 
   if (timing.urgency === 'passed') {
     return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-medium bg-slate-800 text-slate-400 border border-white/10">
+      <span className="inline-flex max-w-full items-center gap-1.5 whitespace-normal px-2.5 py-1 rounded-full text-xs font-mono font-medium bg-slate-800 text-slate-400 border border-white/10">
         <CheckCircle className="w-3.5 h-3.5 text-slate-500" />
         {timing.countdownText}
       </span>
@@ -182,7 +211,7 @@ function CountdownBadge({ releaseTimeUtc, now }: { releaseTimeUtc: string; now: 
   }
 
   return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+    <span className="inline-flex max-w-full items-center gap-1.5 whitespace-normal px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
       <Clock className="w-3.5 h-3.5 text-cyan-400" />
       ⏱️ {timing.countdownText}
     </span>
@@ -241,7 +270,19 @@ interface CalendarEvent {
   actual: number | null
   impact: string
   currency?: string
-  trade_signals?: Record<string, string[]>
+  trade_signals?: Record<string, string[]> | string[]
+  is_simultaneous?: boolean
+  simultaneous_event_codes?: string[]
+  simultaneous_event_names?: string[]
+  prediction?: {
+    lean_direction: string
+    confidence_pct: number
+    composite_score: number
+    event_label: string
+    explanation: string
+    trade_signals: string[]
+    indicators: Indicator[]
+  } | null
 }
 
 interface HistoryItem {
@@ -314,12 +355,12 @@ function IndicatorRow({ ind }: { ind: Indicator }) {
   const z = ind.z_score
 
   return (
-    <div className="flex items-center justify-between py-2.5 border-b border-white/5 last:border-0 gap-3">
-      <div className="flex-1 min-w-0">
-        <p className="text-xs text-slate-300 font-medium truncate">{ind.description}</p>
+    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between py-2.5 border-b border-white/5 last:border-0 gap-2 sm:gap-3">
+      <div className="w-full min-w-0 sm:flex-1">
+        <p className="text-xs text-slate-300 font-medium leading-snug break-words">{ind.description}</p>
         <p className="text-[10px] text-slate-500 font-mono">{ind.fred_series}</p>
       </div>
-      <div className="flex items-center gap-3 flex-shrink-0">
+      <div className="flex w-full items-center justify-between gap-2 sm:w-auto sm:flex-shrink-0 sm:justify-start sm:gap-3">
         <span className="text-xs font-mono text-slate-400">
           {ind.latest_value != null ? ind.latest_value.toFixed(2) : '—'}
         </span>
@@ -388,8 +429,8 @@ function PredictionCard({
       style={{ borderColor: cfg.color + '35' }}
     >
       {/* ── Header row ── */}
-      <div className="flex items-start justify-between gap-4 mb-3">
-        <div>
+      <div className="flex flex-col gap-2 mb-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+        <div className="min-w-0">
           <div className="flex items-center gap-2 mb-1">
             <span className="text-[10px] font-black tracking-widest text-indigo-400 uppercase bg-indigo-500/10 px-2 py-0.5 rounded">
               {pred.event_code}
@@ -413,7 +454,7 @@ function PredictionCard({
           <h2 className="text-lg font-bold text-white tracking-tight">{pred.display_name}</h2>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-shrink-0 items-center gap-1.5 self-end sm:self-auto">
           <button
             onClick={handleSendTelegram}
             title="Send this signal to Telegram"
@@ -619,17 +660,26 @@ function EventFilterDropdown({
   }, [])
 
   const EVENT_LABELS: Record<string, string> = {
-    NFP: 'Non-Farm Payrolls',
-    CPI: 'Consumer Price Index',
-    CORE_CPI: 'Core CPI (ex Food & Energy)',
-    PPI: 'Producer Price Index',
-    UNEMPLOYMENT_RATE: 'Unemployment Rate',
-    JOBLESS_CLAIMS: 'Initial Jobless Claims',
-    CONSUMER_CONFIDENCE: 'Consumer Confidence',
-    FOMC: 'FOMC Rate Decision',
-    RETAIL_SALES: 'Retail Sales',
-    ISM_MFG: 'ISM Manufacturing PMI',
-    GDP: 'GDP Growth Rate',
+    NFP:                'Non-Farm Payrolls',
+    CPI:                'Consumer Price Index',
+    CORE_CPI:           'Core CPI (ex Food & Energy)',
+    PPI:                'Producer Price Index',
+    CORE_PPI:           'Core PPI (ex Food & Energy)',
+    UNEMPLOYMENT_RATE:  'Unemployment Rate',
+    JOBLESS_CLAIMS:     'Initial Jobless Claims',
+    CONSUMER_CONFIDENCE:'Consumer Confidence',
+    FOMC:               'FOMC Rate Decision',
+    RETAIL_SALES:       'Retail Sales',
+    CORE_RETAIL_SALES:  'Core Retail Sales',
+    ISM_MFG:            'ISM Manufacturing PMI',
+    ISM_SERVICES:       'ISM Services PMI',
+    GDP:                'GDP Growth Rate',
+    CORE_PCE:           'Core PCE Price Index',
+    PCE:                'PCE Price Index',
+    ADP_NFP:            'ADP Non-Farm Employment',
+    AVG_HOURLY_EARNINGS:'Average Hourly Earnings',
+    JOLTS:              'JOLTS Job Openings',
+    BUILDING_PERMITS:   'Building Permits',
   }
 
   const selectedLabel = selected ? (EVENT_LABELS[selected] || selected) : `All Events (${totalCount})`
@@ -659,12 +709,15 @@ function EventFilterDropdown({
         </div>
         <div className="flex items-center gap-2">
           {selected && (
-            <button
+            <span
+              role="button"
+              tabIndex={0}
               onClick={(e) => { e.stopPropagation(); onSelect(null) }}
-              className="text-[10px] text-slate-400 hover:text-red-400 px-2 py-0.5 rounded bg-white/5 hover:bg-red-500/10 border border-white/10 transition-all font-semibold"
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); onSelect(null) } }}
+              className="text-[10px] text-slate-400 hover:text-red-400 px-2 py-0.5 rounded bg-white/5 hover:bg-red-500/10 border border-white/10 transition-all font-semibold cursor-pointer"
             >
               ✕ Clear
-            </button>
+            </span>
           )}
           <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
         </div>
@@ -679,7 +732,7 @@ function EventFilterDropdown({
             exit={{ opacity: 0, y: -8, scaleY: 0.92 }}
             transition={{ duration: 0.15, ease: 'easeOut' }}
             style={{ transformOrigin: 'top' }}
-            className="absolute z-50 w-full mt-2 glass border border-white/10 rounded-xl overflow-hidden shadow-2xl shadow-black/60"
+            className="absolute z-50 w-full mt-2 bg-slate-950 border border-white/10 rounded-xl overflow-hidden shadow-2xl shadow-black/60"
           >
             {/* All Events option */}
             <button
@@ -734,7 +787,7 @@ function EventFilterDropdown({
   )
 }
 
-// ── Next Major Red-Folder News Radar Banner ──────────────────────────────────
+// ── Next Major Red-Folder News Radar Banner (Supports Simultaneous Releases) ──
 function NextEventRadar({
   events,
   onAnalyze,
@@ -744,94 +797,188 @@ function NextEventRadar({
   onAnalyze: (code: string) => void
   now: number
 }) {
-  if (!events || events.length === 0) return null
+  // Only work with events that have a known event_code (mapped events)
+  const mapped = (events || []).filter(e => e.event_code)
+  if (mapped.length === 0) return null
 
   // Sort chronologically
-  const sorted = [...events].sort((a, b) => {
+  const sorted = [...mapped].sort((a, b) => {
     const tA = new Date(a.release_time_utc).getTime() || 0
     const tB = new Date(b.release_time_utc).getTime() || 0
     return tA - tB
   })
 
-  // Find nearest upcoming event that hasn't passed, or fall back to the first
-  const upcoming = sorted.find(e => {
+  // Find the nearest truly-upcoming release group (time > now)
+  const nextUpcoming = sorted.find(e => {
     const t = new Date(e.release_time_utc).getTime()
     return t && t > now
-  }) || sorted[0]
+  })
 
-  if (!upcoming) return null
+  // If nothing upcoming, check if something released very recently (within last 2h) to show as 'just released'
+  const twoHoursAgo = now - 2 * 3600 * 1000
+  const recentlyReleased = !nextUpcoming
+    ? sorted.filter(e => {
+        const t = new Date(e.release_time_utc).getTime()
+        return t && t >= twoHoursAgo && t <= now
+      })
+    : []
 
-  const timing = getEventTiming(upcoming.release_time_utc, now)
-  const pairs = EVENT_AFFECTED_PAIRS[upcoming.event_code] || ['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500']
+  // Target time: use next upcoming cluster, or most recent released cluster
+  let targetTimeStr: string
+  let showAsReleased = false
+
+  if (nextUpcoming) {
+    targetTimeStr = nextUpcoming.release_time_utc
+  } else if (recentlyReleased.length > 0) {
+    targetTimeStr = recentlyReleased[recentlyReleased.length - 1].release_time_utc
+    showAsReleased = true
+  } else {
+    // Nothing upcoming and nothing recent — just show the last event
+    targetTimeStr = sorted[sorted.length - 1]?.release_time_utc
+    if (!targetTimeStr) return null
+    showAsReleased = true
+  }
+
+  const targetTimeMs = new Date(targetTimeStr).getTime()
+
+  // Find ALL events releasing at the exact same time (or within 5 min window)
+  const simultaneousEvents = sorted.filter(e => {
+    if (!e.release_time_utc) return false
+    const tMs = new Date(e.release_time_utc).getTime()
+    return Math.abs(tMs - targetTimeMs) < 300000
+  })
+
+  const timing = getEventTiming(targetTimeStr, now)
+  const isMulti = simultaneousEvents.length > 1
+
+  // Compute combined market bias across all simultaneous events
+  const leans = simultaneousEvents.map(e => e.prediction?.lean_direction || 'INLINE')
+  const bullishCount = leans.filter(l => l === 'BULLISH' || l === 'BEAT').length
+  const bearishCount = leans.filter(l => l === 'BEARISH' || l === 'MISS').length
+
+  let combinedVerdict = ''
+  let combinedColor = '#818cf8'
+  if (isMulti) {
+    if (bullishCount > 0 && bearishCount === 0) {
+      combinedVerdict = `🟢 HIGH CONVICTION DUAL USD BULLISH: All ${simultaneousEvents.length} co-releasing events lean positive for USD. Expect strong upside momentum on USD/JPY & pressure on Gold.`
+      combinedColor = '#34d399'
+    } else if (bearishCount > 0 && bullishCount === 0) {
+      combinedVerdict = `🔴 HIGH CONVICTION DUAL USD BEARISH: All ${simultaneousEvents.length} co-releasing events lean negative for USD. Downside pressure on USD/JPY & upside for EUR/USD & Gold.`
+      combinedColor = '#f87171'
+    } else if (bullishCount > 0 && bearishCount > 0) {
+      combinedVerdict = `⚠️ DIVERGENT SIMULTANEOUS SIGNALS: One event leans Bullish USD while another leans Bearish USD. High two-way whipsaw volatility expected at release!`
+      combinedColor = '#fbbf24'
+    } else {
+      combinedVerdict = `⚡ SIMULTANEOUS MULTI-RELEASE: ${simultaneousEvents.length} high-impact red folder events releasing simultaneously at ${timing.timeNy} NY.`
+      combinedColor = '#818cf8'
+    }
+  }
 
   return (
-    <div className="mb-6 relative overflow-hidden rounded-2xl border border-indigo-500/30 bg-gradient-to-r from-slate-900/90 via-indigo-950/40 to-slate-900/90 p-4 sm:p-5 shadow-xl shadow-indigo-950/50 backdrop-blur-md">
-      {/* Decorative ambient glow */}
-      <div className="absolute -top-12 -right-12 w-48 h-48 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute -bottom-12 -left-12 w-48 h-48 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
+    <div className="mb-6 relative overflow-hidden rounded-2xl border border-indigo-500/35 bg-gradient-to-r from-slate-900/95 via-indigo-950/50 to-slate-900/95 p-4 sm:p-6 shadow-2xl shadow-indigo-950/70 backdrop-blur-md">
+      {/* Ambient glows */}
+      <div className="absolute -top-12 -right-12 w-56 h-56 bg-indigo-500/15 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute -bottom-12 -left-12 w-56 h-56 bg-cyan-500/15 rounded-full blur-3xl pointer-events-none" />
 
-      <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        {/* Left: Indicator Info */}
-        <div className="space-y-1.5 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-red-500/20 text-red-400 border border-red-500/30">
+      {/* Top Banner Tag */}
+      <div className="flex flex-col items-start gap-2 mb-4 pb-3 border-b border-white/10 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {showAsReleased ? (
+            <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+              <CheckCircle className="w-3.5 h-3.5" />
+              {isMulti ? `⚡ ${simultaneousEvents.length}-EVENT SIMULTANEOUS RELEASE` : '📌 RECENTLY RELEASED'}
+            </span>
+          ) : isMulti ? (
+            <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider bg-red-500/25 text-red-300 border border-red-500/50 animate-pulse shadow-lg shadow-red-500/20">
+              <span className="w-2 h-2 rounded-full bg-red-400 animate-ping" />
+              ⚡ SIMULTANEOUS {simultaneousEvents.length}-EVENT RED FOLDER DROP
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider bg-red-500/20 text-red-400 border border-red-500/30">
               <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
-              {upcoming.impact} IMPACT
+              {simultaneousEvents[0]?.impact ?? 'HIGH'} IMPACT RED FOLDER
             </span>
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-              {upcoming.event_code}
-            </span>
-            <span className="text-[11px] text-slate-400 font-mono">
-              NEXT HIGH-IMPACT RELEASE
-            </span>
-          </div>
-
-          <h3 className="text-lg sm:text-xl font-black text-white tracking-tight truncate">
-            {upcoming.event_name}
-          </h3>
-
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-300">
-            <span className="flex items-center gap-1.5 font-medium text-slate-200">
-              <Calendar className="w-3.5 h-3.5 text-indigo-400" />
-              {timing.dateFormatted}
-            </span>
-            <span className="flex items-center gap-1.5 font-mono text-cyan-300">
-              <Clock className="w-3.5 h-3.5 text-cyan-400" />
-              {timing.timeNy} (NY) • {timing.timeLocal} (Local)
-            </span>
-          </div>
-
-          {/* Affected pairs */}
-          <div className="flex items-center gap-1.5 pt-1 flex-wrap">
-            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Affected Pairs:</span>
-            {pairs.map((p, idx) => (
-              <span key={idx} className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-white/5 text-slate-200 border border-white/10">
-                {p}
-              </span>
-            ))}
-          </div>
+          )}
+          <span className="max-w-full whitespace-normal text-xs font-mono font-bold text-cyan-300 bg-cyan-500/10 px-2.5 py-0.5 rounded border border-cyan-500/20">
+            {timing.dateFormatted} • {timing.timeNy} (NY)
+          </span>
         </div>
 
-        {/* Right: Big Countdown Clock & Direct Analyze Action */}
-        <div className="flex flex-row sm:flex-col lg:flex-row items-center gap-3 sm:gap-4 flex-shrink-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-white/10">
-          <div className="text-left sm:text-right">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Live Release Countdown</p>
-            <p className="text-xl sm:text-2xl font-black font-mono tracking-tight text-white flex items-center gap-2">
-              <span className={timing.isPassed ? 'text-slate-400' : timing.urgency === 'imminent' ? 'text-red-400 animate-pulse' : timing.urgency === 'soon' ? 'text-amber-400' : 'text-emerald-400'}>
-                {timing.countdownText}
-              </span>
-            </p>
-          </div>
-
-          <button
-            onClick={() => onAnalyze(upcoming.event_code)}
-            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-xs transition-all shadow-lg shadow-indigo-600/30 active:scale-95 whitespace-nowrap ml-auto sm:ml-0"
-          >
-            <Zap className="w-3.5 h-3.5 text-amber-300" />
-            Analyze News
-          </button>
-        </div>
+        <CountdownBadge releaseTimeUtc={targetTimeStr} now={now} />
       </div>
+
+      {/* Multi-event Cards Layout */}
+      <div className={`grid gap-4 mb-4 ${isMulti ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3' : 'grid-cols-1'}`}>
+        {simultaneousEvents.map((ev, idx) => {
+          const pred = ev.prediction
+          const lean = pred?.lean_direction || 'INLINE'
+          const cfg = DIRECTION_CONFIG[lean] || DIRECTION_CONFIG.INLINE
+          const pairs = EVENT_AFFECTED_PAIRS[ev.event_code] || ['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500']
+
+          return (
+            <div
+              key={idx}
+              className="glass p-4 rounded-xl border border-white/10 hover:border-indigo-500/40 transition-all bg-slate-900/80 flex flex-col justify-between"
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <span className="text-[10px] font-black font-mono text-indigo-300 bg-indigo-500/20 px-2 py-0.5 rounded border border-indigo-500/30">
+                    {ev.event_code}
+                  </span>
+                  {pred && (
+                    <span
+                      className="text-[10px] font-black px-2 py-0.5 rounded-full border uppercase font-mono flex items-center gap-1"
+                      style={{ color: cfg.color, background: cfg.bg, borderColor: cfg.color + '40' }}
+                    >
+                      {pred.event_label || cfg.label} ({pred.confidence_pct.toFixed(0)}%)
+                    </span>
+                  )}
+                </div>
+
+                <h4 className="text-base font-bold text-white mb-2 tracking-tight">
+                  {ev.event_name}
+                </h4>
+
+                <div className="flex items-center gap-3 text-xs font-mono text-slate-300 mb-2 flex-wrap">
+                  <span>Fcst: <strong className="text-slate-100">{ev.forecast ?? '—'}</strong></span>
+                  <span>Prev: <strong className="text-slate-400">{ev.previous ?? '—'}</strong></span>
+                  {ev.actual != null && (
+                    <span>Actual: <strong className="text-emerald-300">{ev.actual}</strong></span>
+                  )}
+                </div>
+
+                {/* Affected pairs */}
+                <div className="flex flex-wrap gap-1 mb-3">
+                  {pairs.slice(0, 4).map((p, pIdx) => (
+                    <span key={pIdx} className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10">
+                      {p}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Action Button */}
+              {ev.event_code && (
+                <button
+                  onClick={() => onAnalyze(ev.event_code)}
+                  className="w-full mt-2 flex items-center justify-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-2 rounded-lg text-xs transition-all active:scale-95 shadow-md shadow-indigo-600/20"
+                >
+                  <Zap className="w-3.5 h-3.5 text-amber-300" />
+                  Analyze {ev.event_code}
+                </button>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Combined Multi-Release Verdict Banner (when > 1 event releasing together) */}
+      {isMulti && combinedVerdict && (
+        <div className="p-3.5 rounded-xl bg-slate-900/90 border border-indigo-500/30 flex items-start gap-2.5 text-xs text-slate-200">
+          <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" style={{ color: combinedColor }} />
+          <p className="leading-relaxed font-semibold">{combinedVerdict}</p>
+        </div>
+      )}
     </div>
   )
 }
@@ -840,36 +987,116 @@ function NextEventRadar({
 function CalendarEventCard({
   ev,
   onAnalyze,
-  now
+  now,
+  compact = false,
+  onSyncActuals
 }: {
   ev: CalendarEvent
   onAnalyze: (code: string) => void
   now: number
+  compact?: boolean
+  onSyncActuals?: () => void
 }) {
   const timing = getEventTiming(ev.release_time_utc, now)
-  const pairs = EVENT_AFFECTED_PAIRS[ev.event_code] || ['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500']
+  const pairs = ev.event_code ? (EVENT_AFFECTED_PAIRS[ev.event_code] || ['EUR/USD', 'USD/JPY', 'XAU/USD', 'US500']) : []
+  const pred = ev.prediction
+  const cfg = pred ? (DIRECTION_CONFIG[pred.lean_direction] || DIRECTION_CONFIG.INLINE) : null
+  const isReleased = timing.isPassed
+  const isSpeech = !ev.event_code || ev.forecast == null
 
+  // ── COMPACT mode: used inside simultaneous group containers ──────────────────
+  if (compact) {
+    return (
+      <div className={`p-4 ${isReleased ? 'opacity-85' : ''}`}>
+        <div className="flex items-center gap-1.5 flex-wrap mb-2">
+          <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
+            (ev.impact || '').toUpperCase() === 'HIGH'
+              ? 'bg-red-500/20 text-red-400 border-red-500/30'
+              : (ev.impact || '').toUpperCase() === 'MEDIUM'
+              ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+              : 'bg-slate-500/20 text-slate-400 border-slate-500/30'
+          }`}>
+            {ev.impact || 'MED'}
+          </span>
+          {ev.event_code && (
+            <span className="text-[10px] font-mono font-bold text-indigo-300 bg-indigo-500/15 px-2 py-0.5 rounded border border-indigo-500/20">
+              {ev.event_code}
+            </span>
+          )}
+          {pred && cfg && (
+            <span className="text-[10px] font-black px-2 py-0.5 rounded-full border uppercase font-mono"
+              style={{ color: cfg.color, background: cfg.bg, borderColor: cfg.color + '40' }}>
+              {pred.lean_direction} {pred.confidence_pct.toFixed(0)}%
+            </span>
+          )}
+        </div>
+        <h4 className="text-sm font-bold text-white mb-2">{ev.event_name}</h4>
+        <div className="flex items-center gap-3 text-xs font-mono text-slate-300 mb-2 flex-wrap">
+          {ev.forecast != null && <span>Fcst: <strong className="text-slate-100">{ev.forecast}</strong></span>}
+          {ev.previous != null && <span>Prev: <strong className="text-slate-400">{ev.previous}</strong></span>}
+          {ev.actual != null && (
+            <span>Actual: <strong className="text-emerald-300 text-sm font-black">{ev.actual}</strong></span>
+          )}
+        </div>
+        {ev.event_code && !isReleased && (
+          <button
+            onClick={() => onAnalyze(ev.event_code!)}
+            className="w-full mt-1 flex items-center justify-center gap-1 bg-indigo-600/80 hover:bg-indigo-500 text-white font-bold py-1.5 rounded-lg text-[11px] transition-all active:scale-95"
+          >
+            <Zap className="w-3 h-3 text-amber-300" />
+            Analyze {ev.event_code}
+          </button>
+        )}
+        {isReleased && onSyncActuals && ev.actual == null && (
+          <button
+            onClick={onSyncActuals}
+            className="w-full mt-1 flex items-center justify-center gap-1 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/30 font-bold py-1 rounded-lg text-[10px] transition-all active:scale-95"
+          >
+            {ev.actual != null ? '✏️ Edit Actual' : '🔄 Sync Actuals from Feed'}
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  // ── FULL card mode ─────────────────────────────────────────────────────────
   return (
-    <div className="glass p-5 border border-white/10 hover:border-indigo-500/30 transition-all rounded-2xl relative overflow-hidden bg-slate-900/60">
+    <div className={`glass p-5 border transition-all rounded-2xl relative overflow-hidden ${
+      isReleased
+        ? 'border-slate-500/20 bg-slate-900/40 hover:border-slate-500/30'
+        : 'border-white/10 bg-slate-900/60 hover:border-indigo-500/30'
+    }`}>
       {/* Top row: Badges & Live Countdown */}
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className={`text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full border ${
-            ev.impact.toUpperCase() === 'HIGH'
+            (ev.impact || '').toUpperCase() === 'HIGH'
               ? 'bg-red-500/20 text-red-400 border-red-500/30'
-              : 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+              : (ev.impact || '').toUpperCase() === 'MEDIUM'
+              ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+              : 'bg-slate-500/20 text-slate-400 border-slate-500/30'
           }`}>
-            {ev.impact} IMPACT
+            {ev.impact || 'LOW'} IMPACT
           </span>
           <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
             {ev.currency || 'USD'}
           </span>
-          <span className="text-[11px] font-mono font-bold text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
-            {ev.event_code}
-          </span>
+          {ev.event_code && (
+            <span className="text-[11px] font-mono font-bold text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
+              {ev.event_code}
+            </span>
+          )}
+          {isSpeech && (
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-700/50 text-slate-400 border border-slate-600/30">
+              📣 SPEECH
+            </span>
+          )}
+          {isReleased && (
+            <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-slate-500/20 text-slate-400 border border-slate-500/30 flex items-center gap-1">
+              <CheckCircle className="w-3 h-3" /> RELEASED
+            </span>
+          )}
         </div>
-
-        {/* Live Countdown Badge */}
         <CountdownBadge releaseTimeUtc={ev.release_time_utc} now={now} />
       </div>
 
@@ -878,20 +1105,19 @@ function CalendarEventCard({
         {ev.event_name}
       </h4>
 
-      {/* Date & Exact Time Display */}
+      {/* Date & Time */}
       <div className="glass-sm p-3 rounded-xl border border-white/5 mb-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
         <div className="flex items-center gap-2 text-slate-300">
           <Calendar className="w-4 h-4 text-indigo-400 flex-shrink-0" />
           <div>
-            <p className="text-[10px] text-slate-500 uppercase font-semibold">Exact Date</p>
+            <p className="text-[10px] text-slate-500 uppercase font-semibold">Date</p>
             <p className="font-semibold text-slate-200">{timing.dateFormatted}</p>
           </div>
         </div>
-
         <div className="flex items-center gap-2 text-slate-300">
           <Clock className="w-4 h-4 text-cyan-400 flex-shrink-0" />
           <div>
-            <p className="text-[10px] text-slate-500 uppercase font-semibold">Exact Release Time</p>
+            <p className="text-[10px] text-slate-500 uppercase font-semibold">Release Time</p>
             <p className="font-mono font-bold text-cyan-300">
               {timing.timeNy} <span className="text-slate-400 font-normal">NY</span> • {timing.timeLocal} <span className="text-slate-400 font-normal">Local</span>
             </p>
@@ -899,49 +1125,115 @@ function CalendarEventCard({
         </div>
       </div>
 
-      {/* Pairs to be Affected */}
-      <div className="mb-4">
-        <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
-          Pairs to be Affected:
-        </p>
-        <div className="flex flex-wrap gap-1.5">
-          {pairs.map((pair, idx) => (
-            <span
-              key={idx}
-              className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg bg-indigo-950/50 text-indigo-300 border border-indigo-500/25"
+      {/* Actual released value: prominent green banner or record actual prompt */}
+      {ev.actual != null ? (
+        <div className="mb-3 p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/30 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div>
+              <p className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider">✅ Actual Released</p>
+              <p className="text-xl font-black font-mono text-emerald-300">{ev.actual}</p>
+            </div>
+            {ev.forecast != null && (
+              <div className="text-xs font-mono text-slate-400">
+                <span>vs Forecast: <span className="text-slate-200 font-bold">{ev.forecast}</span></span>
+                {ev.actual !== ev.forecast && (
+                  <span className={`ml-2 font-black ${(ev.actual - ev.forecast) > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    ({(ev.actual - ev.forecast) > 0 ? '+' : ''}{(ev.actual - ev.forecast).toFixed(2)} surprise)
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+          {false && (
+            <button
+              onClick={onSyncActuals}
+              className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white border border-white/10 transition-all active:scale-95"
             >
-              {pair}
-            </span>
-          ))}
+              🔄 Sync Actuals
+            </button>
+          )}
         </div>
-      </div>
+      ) : isReleased ? (
+        <div className="mb-3 p-3 rounded-xl bg-slate-800/40 border border-slate-700/50 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-amber-400" />
+            <span className="text-xs text-slate-300 font-medium">Actuals auto-synced every 5 min from live feed</span>
+          </div>
+          {false && (
+            <button
+              onClick={onSyncActuals}
+              className="text-xs font-bold px-3 py-1.5 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/30 transition-all flex items-center gap-1 active:scale-95"
+            >
+              🔄 Sync Actuals from Feed
+            </button>
+          )}
+        </div>
+      ) : null}
 
-      {/* Forecast & Previous Metrics + Action button */}
+      {/* Model Prediction Outcome Banner */}
+      {pred && cfg && (
+        <div
+          className="mb-3.5 p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+          style={{ background: cfg.bg, borderColor: cfg.color + '40' }}
+        >
+          <div>
+            <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-0.5">🤖 Model Predicted Outcome</p>
+            <p className="text-sm font-black font-mono tracking-wide" style={{ color: cfg.color }}>
+              {pred.event_label || cfg.label} ({pred.confidence_pct.toFixed(0)}% Confidence)
+            </p>
+          </div>
+          {pred.trade_signals && pred.trade_signals.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {pred.trade_signals.slice(0, 3).map((sig: string, sIdx: number) => (
+                <span key={sIdx} className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-black/40 text-slate-200 border border-white/10">
+                  {sig}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Affected Pairs */}
+      {pairs.length > 0 && (
+        <div className="mb-4">
+          <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">Pairs to be Affected:</p>
+          <div className="flex flex-wrap gap-1.5">
+            {pairs.map((pair, idx) => (
+              <span key={idx} className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg bg-indigo-950/50 text-indigo-300 border border-indigo-500/25">
+                {pair}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Forecast / Previous / Action */}
       <div className="flex flex-wrap items-center justify-between gap-4 pt-3 border-t border-white/5">
         <div className="flex items-center gap-5">
-          <div>
-            <p className="text-[10px] text-slate-500 uppercase font-semibold">Forecast</p>
-            <p className="text-sm font-mono font-bold text-slate-200">{ev.forecast ?? '—'}</p>
-          </div>
-          <div>
-            <p className="text-[10px] text-slate-500 uppercase font-semibold">Previous</p>
-            <p className="text-sm font-mono font-bold text-slate-400">{ev.previous ?? '—'}</p>
-          </div>
-          {ev.actual != null && (
+          {ev.forecast != null && (
             <div>
-              <p className="text-[10px] text-emerald-400 uppercase font-bold">Actual</p>
-              <p className="text-sm font-mono font-bold text-emerald-300">{ev.actual}</p>
+              <p className="text-[10px] text-slate-500 uppercase font-semibold">Forecast</p>
+              <p className="text-sm font-mono font-bold text-slate-200">{ev.forecast}</p>
+            </div>
+          )}
+          {ev.previous != null && (
+            <div>
+              <p className="text-[10px] text-slate-500 uppercase font-semibold">Previous</p>
+              <p className="text-sm font-mono font-bold text-slate-400">{ev.previous}</p>
             </div>
           )}
         </div>
 
-        <button
-          onClick={() => onAnalyze(ev.event_code)}
-          className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-md shadow-indigo-600/20 flex items-center gap-2 active:scale-95"
-        >
-          <Zap className="w-3.5 h-3.5 text-amber-300" />
-          Analyze {ev.event_code} News & Signals
-        </button>
+        {ev.event_code && !isSpeech && (
+          <button
+            onClick={() => onAnalyze(ev.event_code!)}
+            className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-md shadow-indigo-600/20 flex items-center gap-2 active:scale-95"
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-300" />
+            {ev.event_code} Breakdown
+          </button>
+        )}
       </div>
     </div>
   )
@@ -962,6 +1254,10 @@ export default function App() {
   const [analyzingCode, setAnalyzingCode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState<number>(Date.now())
+  const [signalDateScope, setSignalDateScope] = useState<DateScope>('today')
+  const [signalsHighImpactOnly, setSignalsHighImpactOnly] = useState(true)
+  const [calendarDateScope, setCalendarDateScope] = useState<DateScope>('today')
+  const [calendarHighImpactOnly, setCalendarHighImpactOnly] = useState(true)
 
   // Dynamic 1-second clock ticker for real-time live countdowns
   useEffect(() => {
@@ -975,6 +1271,27 @@ export default function App() {
     setAnalyzingCode(eventCode)
     await runPrediction(eventCode)
     setAnalyzingCode(null)
+  }
+
+  // Fully automatic: polls live FF feed, detects actuals, grades predictions. No user input.
+  const [syncingActuals, setSyncingActuals] = useState(false)
+  const [lastSyncResult, setLastSyncResult] = useState<{ graded: number; names: string[] } | null>(null)
+
+  const handleSyncActuals = async () => {
+    setSyncingActuals(true)
+    setLastSyncResult(null)
+    try {
+      const res = await axios.post(`${API}/api/events/sync-actuals`)
+      const graded = res.data.graded ?? []
+      setLastSyncResult({ graded: graded.length, names: graded.map((g: any) => g.display_name) })
+      await fetchCalendar()
+      await fetchHistory()
+      await fetchPredictions()
+    } catch (err: any) {
+      console.error('Sync actuals failed:', err?.response?.data?.detail || err.message)
+    } finally {
+      setSyncingActuals(false)
+    }
   }
 
   const fetchHealth = useCallback(async () => {
@@ -1090,11 +1407,41 @@ export default function App() {
     fetchPredictions()
     fetchCalendar()
     fetchHistory()
-    const interval = setInterval(() => {
+    // Refresh predictions every 60s, calendar every 5min (live countdown data)
+    const predInterval = setInterval(() => {
       fetchPredictions()
     }, 60000)
-    return () => clearInterval(interval)
+    const calInterval = setInterval(() => {
+      fetchCalendar()
+    }, 300000) // 5 minutes
+    return () => {
+      clearInterval(predInterval)
+      clearInterval(calInterval)
+    }
   }, [fetchHealth, fetchPredictions, fetchCalendar, fetchHistory])
+
+  const visiblePredictions = predictions
+    .filter(prediction => {
+      const event = calendarEvents.find(item => item.event_code === prediction.event_code)
+      if (selectedEventCode && prediction.event_code !== selectedEventCode) return false
+      if (signalsHighImpactOnly && event?.impact.toUpperCase() !== 'HIGH') return false
+      return matchesDateScope(event?.release_time_utc, signalDateScope, now)
+    })
+    .sort((left, right) => {
+      const leftEvent = calendarEvents.find(item => item.event_code === left.event_code)
+      const rightEvent = calendarEvents.find(item => item.event_code === right.event_code)
+      const leftTime = leftEvent?.release_time_utc ? new Date(leftEvent.release_time_utc).getTime() : Number.NaN
+      const rightTime = rightEvent?.release_time_utc ? new Date(rightEvent.release_time_utc).getTime() : Number.NaN
+      const leftHasTime = Number.isFinite(leftTime)
+      const rightHasTime = Number.isFinite(rightTime)
+      const leftUpcoming = leftHasTime && leftTime >= now
+      const rightUpcoming = rightHasTime && rightTime >= now
+
+      if (leftUpcoming !== rightUpcoming) return leftUpcoming ? -1 : 1
+      if (leftHasTime !== rightHasTime) return leftHasTime ? -1 : 1
+      if (leftHasTime && rightHasTime) return leftUpcoming ? leftTime - rightTime : rightTime - leftTime
+      return new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
+    })
 
   return (
     <div className="bg-ambient min-h-screen text-slate-100">
@@ -1126,24 +1473,20 @@ export default function App() {
             </div>
           </div>
 
-          {/* Status Badges */}
+          {/* Product positioning */}
           <div className="flex items-center gap-2 flex-wrap">
-            {health && (
-              <>
-                <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border ${health.fred_configured ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
-                  {health.fred_configured ? <CheckCircle className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
-                  FRED API
-                </span>
-                <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border ${health.telegram_configured ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border-amber-500/20'}`}>
-                  {health.telegram_configured ? <CheckCircle className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
-                  Telegram Bot
-                </span>
-                <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
-                  <Clock className="w-3 h-3" />
-                  Auto-Alert (2h prior)
-                </span>
-              </>
-            )}
+            <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 text-emerald-300">
+              <TrendingUp className="w-3 h-3" />
+              Macro Intelligence
+            </span>
+            <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border border-cyan-500/20 bg-cyan-500/10 text-cyan-300">
+              <Calendar className="w-3 h-3" />
+              Market Radar
+            </span>
+            <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border border-amber-500/20 bg-amber-500/10 text-amber-300">
+              <Award className="w-3 h-3" />
+              Decision Journal
+            </span>
           </div>
         </header>
 
@@ -1163,10 +1506,10 @@ export default function App() {
         />
 
         {/* ── Navigation Tabs ── */}
-        <div className="flex items-center gap-1 mb-6 border-b border-white/10 pb-2 overflow-x-auto no-scrollbar">
+        <div className="grid grid-cols-2 gap-2 mb-6 border-b border-white/10 pb-2 sm:flex sm:flex-wrap sm:items-center sm:gap-1">
           <button
             onClick={() => setActiveTab('predictions')}
-            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
+            className={`flex w-full items-center justify-center gap-1.5 px-2 py-2.5 rounded-xl text-xs sm:w-auto sm:px-4 sm:text-sm font-semibold transition-all whitespace-nowrap ${
               activeTab === 'predictions'
                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -1179,20 +1522,20 @@ export default function App() {
 
           <button
             onClick={() => { setActiveTab('calendar'); fetchCalendar() }}
-            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
+            className={`flex w-full items-center justify-center gap-1.5 px-2 py-2.5 rounded-xl text-xs sm:w-auto sm:px-4 sm:text-sm font-semibold transition-all whitespace-nowrap ${
               activeTab === 'calendar'
                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
             <Calendar className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            <span className="hidden xs:inline">Calendar</span>
+            <span>Calendar</span>
             <span className="hidden sm:inline">({calendarEvents.length})</span>
           </button>
 
           <button
-            onClick={() => { setActiveTab('accuracy'); fetchHistory() }}
-            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
+            onClick={() => { setActiveTab('accuracy'); fetchHistory(); fetchPredictions() }}
+            className={`flex w-full items-center justify-center gap-1.5 px-2 py-2.5 rounded-xl text-xs sm:w-auto sm:px-4 sm:text-sm font-semibold transition-all whitespace-nowrap ${
               activeTab === 'accuracy'
                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -1205,14 +1548,14 @@ export default function App() {
 
           <button
             onClick={() => setActiveTab('telegram')}
-            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
+            className={`flex w-full items-center justify-center gap-1.5 px-2 py-2.5 rounded-xl text-xs sm:w-auto sm:px-4 sm:text-sm font-semibold transition-all whitespace-nowrap ${
               activeTab === 'telegram'
                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
             <Bell className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            <span className="hidden xs:inline">Telegram</span>
+            <span>Telegram</span>
           </button>
         </div>
 
@@ -1255,6 +1598,33 @@ export default function App() {
                   <RefreshCw className="w-4 h-4 text-slate-400" />
                 </button>
               </div>
+            </div>
+
+            <div className="glass-sm mb-4 flex flex-col gap-3 p-3 sm:flex-row sm:items-end">
+              <label className="flex flex-col gap-1.5 text-xs font-semibold text-slate-400">
+                Release window
+                <select
+                  value={signalDateScope}
+                  onChange={event => setSignalDateScope(event.target.value as DateScope)}
+                  className="min-h-10 rounded-lg border border-white/10 bg-slate-900 px-3 text-sm text-slate-100"
+                >
+                  <option value="all">All dates</option>
+                  <option value="today">Today</option>
+                  <option value="week">This week</option>
+                </select>
+              </label>
+              <label className="flex min-h-10 cursor-pointer items-center gap-2 text-sm font-semibold text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={signalsHighImpactOnly}
+                  onChange={event => setSignalsHighImpactOnly(event.target.checked)}
+                  className="h-4 w-4 accent-red-500"
+                />
+                Red-folder only
+              </label>
+              <p className="text-xs text-slate-500 sm:ml-auto">
+                {visiblePredictions.length} of {predictions.length} signals · nearest release first
+              </p>
             </div>
 
             {/* ── Event Filter Dropdown ── */}
@@ -1307,6 +1677,22 @@ export default function App() {
               </div>
             )}
 
+            {predictions.length > 0 && visiblePredictions.length === 0 && analyzingCode !== selectedEventCode && (
+              <div className="glass mb-4 p-6 text-center">
+                <p className="font-semibold text-slate-200">No signals match these filters.</p>
+                <button
+                  onClick={() => {
+                    setSignalDateScope('all')
+                    setSignalsHighImpactOnly(false)
+                    setSelectedEventCode(null)
+                  }}
+                  className="mt-3 rounded-lg border border-white/10 px-3 py-2 text-sm text-slate-300 hover:bg-white/5"
+                >
+                  Clear filters
+                </button>
+              </div>
+            )}
+
             {/* If a single event is selected but hasn't finished loading yet */}
             {selectedEventCode && predictions.filter(p => p.event_code === selectedEventCode).length === 0 && analyzingCode === selectedEventCode && (
               <div className="glass p-10 text-center border border-indigo-500/30">
@@ -1322,10 +1708,7 @@ export default function App() {
 
             <div className={`grid gap-4 ${selectedEventCode ? 'grid-cols-1 max-w-2xl mx-auto' : 'grid-cols-1 lg:grid-cols-2'}`}>
               <AnimatePresence>
-                {(selectedEventCode
-                  ? predictions.filter(p => p.event_code === selectedEventCode)
-                  : predictions
-                ).map(pred => (
+                {visiblePredictions.map(pred => (
                   <PredictionCard
                     key={pred.id}
                     pred={pred}
@@ -1341,42 +1724,220 @@ export default function App() {
         )}
 
         {/* ── TAB 2: RED-FOLDER CALENDAR ── */}
-        {activeTab === 'calendar' && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between mb-2">
-              <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
-                  This Week's High-Impact Releases
-                </h3>
-                <p className="text-xs text-slate-400">Forex Factory Live Feed with exact release times, live countdowns, and affected asset pairs</p>
-              </div>
-              <button
-                onClick={fetchCalendar}
-                className="p-2 rounded-xl glass-sm hover:bg-white/10 text-slate-400 hover:text-white transition-all flex items-center gap-1.5 text-xs font-semibold"
-                title="Refresh calendar"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Refresh</span>
-              </button>
-            </div>
+        {activeTab === 'calendar' && (() => {
+          const scopedEvents = calendarEvents.filter(event => {
+            const isHighImpact = (event.impact || '').toUpperCase() === 'HIGH'
+            return (!calendarHighImpactOnly || isHighImpact) &&
+              matchesDateScope(event.release_time_utc, calendarDateScope, now)
+          })
 
-            {calendarEvents.length === 0 ? (
-              <div className="glass p-8 text-center text-slate-400">
-                No high-impact USD events found for this week in the feed.
+          // Split into upcoming vs released
+          const upcoming = scopedEvents.filter(e => {
+            const t = e.release_time_utc ? new Date(e.release_time_utc).getTime() : 0
+            return t > now
+          }).sort((a, b) => new Date(a.release_time_utc).getTime() - new Date(b.release_time_utc).getTime())
+          const released = scopedEvents.filter(e => {
+            const t = e.release_time_utc ? new Date(e.release_time_utc).getTime() : 0
+            return t && t <= now
+          }).sort((a, b) => new Date(b.release_time_utc).getTime() - new Date(a.release_time_utc).getTime())
+
+          // Group upcoming events by release time (within 5 min = simultaneous)
+          const groupByTime = (evs: CalendarEvent[]) => {
+            const groups: CalendarEvent[][] = []
+            const used = new Set<number>()
+            evs.forEach((ev, i) => {
+              if (used.has(i)) return
+              const tA = new Date(ev.release_time_utc).getTime()
+              const group = [ev]
+              evs.forEach((ev2, j) => {
+                if (j === i || used.has(j)) return
+                const tB = new Date(ev2.release_time_utc).getTime()
+                if (Math.abs(tA - tB) < 300000) { group.push(ev2); used.add(j) }
+              })
+              used.add(i)
+              groups.push(group)
+            })
+            return groups
+          }
+
+          const upcomingGroups = groupByTime(upcoming)
+          const releasedGroups = groupByTime(released)
+
+          return (
+            <div className="space-y-5">
+              {/* Header */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
+                    {calendarDateScope === 'today' ? "Today's USD agenda" : calendarDateScope === 'week' ? "This week's USD agenda" : 'All scheduled USD events'}
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {scopedEvents.length} events · {upcoming.length} upcoming · {released.length} released
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleSyncActuals}
+                    disabled={syncingActuals}
+                    className={`p-2 rounded-xl glass-sm text-xs font-bold flex items-center gap-1.5 transition-all ${
+                      syncingActuals
+                        ? 'opacity-60 cursor-not-allowed text-sky-400'
+                        : 'hover:bg-sky-500/20 text-sky-400 hover:text-sky-300'
+                    }`}
+                    title="Sync actual prints from live Forex Factory feed — no manual input needed"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${syncingActuals ? 'animate-spin' : ''}`} />
+                    <span className="hidden sm:inline">{syncingActuals ? 'Syncing…' : 'Sync Actuals'}</span>
+                  </button>
+                  <button
+                    onClick={fetchCalendar}
+                    className="p-2 rounded-xl glass-sm hover:bg-white/10 text-slate-400 hover:text-white transition-all flex items-center gap-1.5 text-xs font-semibold"
+                    title="Refresh calendar"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Refresh</span>
+                  </button>
+                </div>
               </div>
-            ) : (
-              calendarEvents.map((ev, idx) => (
-                <CalendarEventCard
-                  key={idx}
-                  ev={ev}
-                  onAnalyze={handleAnalyzeEvent}
-                  now={now}
-                />
-              ))
-            )}
-          </div>
-        )}
+
+              <div className="glass-sm flex flex-col gap-3 p-3 sm:flex-row sm:items-end">
+                <label className="flex flex-col gap-1.5 text-xs font-semibold text-slate-400">
+                  Show dates
+                  <select
+                    value={calendarDateScope}
+                    onChange={event => setCalendarDateScope(event.target.value as DateScope)}
+                    className="min-h-10 rounded-lg border border-white/10 bg-slate-900 px-3 text-sm text-slate-100"
+                  >
+                    <option value="today">Today</option>
+                    <option value="week">This week</option>
+                    <option value="all">All dates</option>
+                  </select>
+                </label>
+                <label className="flex min-h-10 cursor-pointer items-center gap-2 text-sm font-semibold text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={calendarHighImpactOnly}
+                    onChange={event => setCalendarHighImpactOnly(event.target.checked)}
+                    className="h-4 w-4 accent-red-500"
+                  />
+                  Red-folder only
+                </label>
+                <p className="text-xs text-slate-500 sm:ml-auto">
+                  {calendarHighImpactOnly ? 'High-impact events' : 'All impact levels'}
+                </p>
+              </div>
+              {lastSyncResult && (
+                <div className={`mt-2 px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 ${
+                  lastSyncResult.graded > 0
+                    ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-slate-700/40 text-slate-400 border border-slate-600/30'
+                }`}>
+                  {lastSyncResult.graded > 0 ? '✅' : 'ℹ️'}
+                  {lastSyncResult.graded > 0
+                    ? `Auto-graded ${lastSyncResult.graded} event${lastSyncResult.graded > 1 ? 's' : ''}: ${lastSyncResult.names.join(', ')}`
+                    : 'No new actuals detected yet — Forex Factory may not have published them yet.'}
+                </div>
+              )}
+
+              {calendarEvents.length === 0 && (
+                <div className="glass p-8 text-center text-slate-400">
+                  No USD events found for this week. Check connection.
+                </div>
+              )}
+
+              {calendarEvents.length > 0 && scopedEvents.length === 0 && (
+                <div className="glass p-6 text-center">
+                  <p className="font-semibold text-slate-200">No events match this view.</p>
+                  <button
+                    onClick={() => {
+                      setCalendarDateScope('week')
+                      setCalendarHighImpactOnly(false)
+                    }}
+                    className="mt-3 rounded-lg border border-white/10 px-3 py-2 text-sm text-slate-300 hover:bg-white/5"
+                  >
+                    Show all this week
+                  </button>
+                </div>
+              )}
+
+              {/* ── UPCOMING SECTION ── */}
+              {upcoming.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="text-xs font-black uppercase tracking-widest text-cyan-400 bg-cyan-500/10 px-2.5 py-1 rounded-lg border border-cyan-500/20">
+                      ⏳ UPCOMING ({upcoming.length})
+                    </span>
+                    <div className="h-px flex-1 bg-white/10" />
+                  </div>
+                  <div className="space-y-3">
+                    {upcomingGroups.map((group, gIdx) => (
+                      group.length > 1 ? (
+                        // Simultaneous group
+                        <div key={gIdx} className="glass border border-red-500/30 rounded-2xl overflow-hidden bg-slate-900/60">
+                          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-red-500/20 bg-red-500/5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
+                            <span className="text-[10px] font-black uppercase tracking-wider text-red-300">
+                              ⚡ {group.length} Events Releasing Simultaneously
+                            </span>
+                            <span className="ml-auto text-[10px] font-mono text-cyan-300">
+                              {getEventTiming(group[0].release_time_utc, now).timeNy} NY
+                            </span>
+                            <CountdownBadge releaseTimeUtc={group[0].release_time_utc} now={now} />
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-0 divide-y md:divide-y-0 md:divide-x divide-white/5">
+                            {group.map((ev, eIdx) => (
+                              <CalendarEventCard key={eIdx} ev={ev} onAnalyze={handleAnalyzeEvent} now={now} compact onSyncActuals={handleSyncActuals} />
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <CalendarEventCard key={gIdx} ev={group[0]} onAnalyze={handleAnalyzeEvent} now={now} onSyncActuals={handleSyncActuals} />
+                      )
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ── RELEASED SECTION ── */}
+              {released.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-2 mb-3 mt-2">
+                    <span className="text-xs font-black uppercase tracking-widest text-slate-400 bg-slate-500/10 px-2.5 py-1 rounded-lg border border-slate-500/20">
+                      ✅ RELEASED ({released.length})
+                    </span>
+                    <div className="h-px flex-1 bg-white/5" />
+                  </div>
+                  <div className="space-y-3 opacity-90">
+                    {releasedGroups.map((group, gIdx) => (
+                      group.length > 1 ? (
+                        <div key={gIdx} className="glass border border-slate-500/20 rounded-2xl overflow-hidden bg-slate-900/40">
+                          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-white/5 bg-slate-800/30">
+                            <CheckCircle className="w-3 h-3 text-slate-400" />
+                            <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                              ⚡ {group.length} Simultaneous Releases
+                            </span>
+                            <span className="ml-auto text-[10px] font-mono text-slate-500">
+                              {getEventTiming(group[0].release_time_utc, now).timeNy} NY
+                            </span>
+                            <CountdownBadge releaseTimeUtc={group[0].release_time_utc} now={now} />
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-0 divide-y md:divide-y-0 md:divide-x divide-white/5">
+                            {group.map((ev, eIdx) => (
+                              <CalendarEventCard key={eIdx} ev={ev} onAnalyze={handleAnalyzeEvent} now={now} compact onSyncActuals={handleSyncActuals} />
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <CalendarEventCard key={gIdx} ev={group[0]} onAnalyze={handleAnalyzeEvent} now={now} onSyncActuals={handleSyncActuals} />
+                      )
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
         {/* ── TAB 3: ACCURACY & HISTORY ── */}
         {activeTab === 'accuracy' && (
@@ -1434,8 +1995,20 @@ export default function App() {
 
             {/* Side-by-side past outcomes list */}
             <div className="glass p-5 border border-white/5">
-              <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-1">Past Predictions vs Actuals — Honest Ledger</h4>
-              <p className="text-[11px] text-slate-500 mb-4">Zero falsification. Every incorrect prediction is recorded as a loss. No missed call is labelled correct.</p>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+                <div>
+                  <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-0.5">Past Predictions vs Actuals — Honest Ledger</h4>
+                  <p className="text-[11px] text-slate-500">Zero falsification. Every incorrect prediction is recorded as a loss. No missed call is labelled correct.</p>
+                </div>
+                <button
+                  onClick={() => { fetchHistory(); fetchPredictions() }}
+                  className="px-3 py-1.5 rounded-xl glass-sm hover:bg-white/10 text-slate-400 hover:text-white transition-all flex items-center gap-1.5 text-xs font-semibold self-start sm:self-auto flex-shrink-0"
+                  title="Refresh accuracy statistics and ledger"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Refresh Ledger</span>
+                </button>
+              </div>
               <div className="space-y-3">
                 {historyItems.map((item) => {
                   const surpriseColor = getSurpriseColor(item.event_code, item.surprise)
@@ -1637,10 +2210,9 @@ export default function App() {
         <footer className="text-center text-xs text-slate-600 mt-12 border-t border-white/5 pt-6 space-y-1">
           <div className="flex items-center justify-center gap-2">
             <img src="/logo.png" alt="TitanFX Sage" className="w-5 h-5 rounded object-contain opacity-60" />
-            <span className="font-bold text-slate-500">TitanFX Sage — Macro Predictor</span>
+            <span className="font-bold text-slate-400">TitanFX Sage — Macro Predictor</span>
           </div>
-          <p>Real-time Leading Indicators via FRED & Forex Factory · Built for serious traders</p>
-          <p style={{ color: '#4ade8040' }}>Trade With Logic. Code Your Edge. Master The Market.</p>
+          <p className="pt-1 text-sm font-semibold text-emerald-300">See beyond the price. Trade the bigger picture.</p>
         </footer>
       </div>
     </div>

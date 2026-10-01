@@ -10,8 +10,9 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
+import json
 from database import SessionLocal, Prediction as PredictionModel, AlertLog, Release
-from config.events import EVENTS
+from config.events import EVENTS, get_event_config
 from indicators import build_composite_score
 from calendar_feed import fetch_upcoming_red_folder_events
 from alerts import send_telegram_alert, BOT_TOKEN, CHAT_ID
@@ -115,12 +116,13 @@ def check_and_alert_upcoming():
 
     db = SessionLocal()
     try:
-        events = fetch_upcoming_red_folder_events()
+        # Force-refresh so we pick up newly published actual values immediately
+        events = fetch_upcoming_red_folder_events(force_refresh=True)
         now_utc = datetime.utcnow()
 
         for ev in events:
             code = ev.get("event_code")
-            if not code or code not in EVENTS:
+            if not code:
                 continue
 
             rel_str = ev.get("release_time_utc")
@@ -176,6 +178,34 @@ def check_and_alert_upcoming():
                     PredictionModel.event_code == code,
                     PredictionModel.was_correct == None
                 ).order_by(PredictionModel.created_at.desc()).first()
+
+                if not recent_pred:
+                    already_graded = db.query(PredictionModel).filter(
+                        PredictionModel.event_code == code,
+                        PredictionModel.was_correct != None,
+                        PredictionModel.actual == actual,
+                    ).first()
+                    if already_graded:
+                        continue
+
+                    # Auto-generate prediction from leading indicators
+                    try:
+                        comp = build_composite_score(code)
+                        event_cfg = get_event_config(code)
+                        recent_pred = PredictionModel(
+                            event_code=code,
+                            event_display_name=event_cfg.get("display_name", code),
+                            composite_score=comp["composite_score"],
+                            lean_direction=comp["lean_direction"],
+                            confidence_pct=comp["confidence_pct"],
+                            indicator_breakdown=json.dumps(comp["indicator_breakdown"]),
+                        )
+                        db.add(recent_pred)
+                        db.commit()
+                        db.refresh(recent_pred)
+                    except Exception as err:
+                        log.warning("Could not auto-generate prediction for grading %s: %s", code, err)
+                        continue
 
                 if recent_pred:
                     surprise = round(actual - forecast, 4)

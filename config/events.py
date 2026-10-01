@@ -34,11 +34,11 @@ EVENTS = {
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
-            ("ADPWNELJN",   0.30, +1, "ADP Private Payrolls — direct private jobs proxy"),
+            ("ADPWNUSNERSA", 0.30, +1, "ADP Private Payrolls — direct private jobs proxy"),
             ("IC4WSA",      0.25, -1, "4-Week Avg Initial Jobless Claims — rising = soft labor"),
             ("MANEMP",      0.20, +1, "ISM Mfg Employment Sub-index — factory hiring"),
-            ("NMFEMPOBS",   0.15, +1, "ISM Non-Mfg Employment Sub-index — services hiring"),
-            ("CHALLNG",     0.10, -1, "Challenger Job Cuts — corporate layoffs signal"),
+            ("SRVPRD",      0.15, +1, "Services Employment — services hiring proxy"),
+            ("JTSLDL",      0.10, -1, "Layoffs & Discharges — corporate layoffs signal"),
         ],
     },
     "CPI": {
@@ -63,7 +63,7 @@ EVENTS = {
         "indicators": [
             ("GASREGCOVW",     0.25, +1, "Weekly US Retail Gasoline — primary energy CPI driver"),
             ("MHHNGSP",        0.15, +1, "Henry Hub Natural Gas — utility bills component"),
-            ("NMFPRCOBS",      0.20, +1, "ISM Non-Mfg Prices Paid — services sticky inflation"),
+            ("PPIFES",         0.20, +1, "PPI Final Demand Services — services sticky inflation"),
             ("PPIACO",         0.25, +1, "PPI All Commodities — producer input costs passed to CPI"),
             ("CUSR0000SETB01", 0.15, +1, "CPI Used Cars & Trucks — secondary goods component"),
         ],
@@ -90,9 +90,9 @@ EVENTS = {
         "indicators": [
             ("CUSR0000SEHA",  0.30, +1, "CPI Rent of Primary Residence — ~34% of core basket"),
             ("CUSR0000SEHC",  0.25, +1, "CPI Owner's Equivalent Rent (OER)"),
-            ("NMFPRCOBS",     0.20, +1, "ISM Non-Mfg Prices Paid — services price pressures"),
-            ("PCU0000000000", 0.15, +1, "PPI Final Demand — pipeline pricing pressure"),
-            ("PPIFES",        0.10, +1, "PPI Final Demand Services — feeds core services CPI"),
+            ("PPIFES",        0.20, +1, "PPI Final Demand Services — services price pressures"),
+            ("PPIFIS",        0.15, +1, "PPI Final Demand — pipeline pricing pressure"),
+            ("PPIACO",        0.10, +1, "PPI All Commodities — feeds goods inflation"),
         ],
     },
     "PPI": {
@@ -117,7 +117,7 @@ EVENTS = {
         "indicators": [
             ("DCOILWTICO",  0.30, +1, "WTI Crude Oil — dominant cost input for producers"),
             ("PCUOMFGOMFG", 0.20, +1, "PPI Manufacturing — upstream goods pressure"),
-            ("NMFPRCOBS",   0.20, +1, "ISM Non-Mfg Prices Paid — service-sector costs"),
+            ("PPIFES",      0.20, +1, "PPI Final Demand Services — service-sector costs"),
             ("MANEMP",      0.15, +1, "ISM Mfg Employment — capacity utilization proxy"),
             ("PPICRM",      0.15, +1, "PPI Crude Materials — raw material pipeline"),
         ],
@@ -144,7 +144,7 @@ EVENTS = {
         "indicators": [
             ("IC4WSA",      0.35, -1, "4-Week Claims Moving Average — falling claims = bullish USD"),
             ("CCSA",        0.30, -1, "Continued Claims — lower continuing claims = strong labor"),
-            ("CHALLNG",     0.20, -1, "Challenger Layoffs — low layoffs = resilient economy"),
+            ("JTSLDL",      0.20, -1, "Layoffs & Discharges — low layoffs = resilient economy"),
             ("MANEMP",      0.15, +1, "ISM Mfg Employment — active hiring demand"),
         ],
     },
@@ -170,7 +170,7 @@ EVENTS = {
         "indicators": [
             ("IC4WSA",      0.30, -1, "4-Week Jobless Claims Avg — lower claims = lower unemployment"),
             ("CCSA",        0.25, -1, "Continued Jobless Claims — low duration = healthy labor"),
-            ("CHALLNG",     0.20, -1, "Challenger Layoffs — fewer cuts = lower unemployment"),
+            ("JTSLDL",      0.20, -1, "Layoffs & Discharges — fewer layoffs = lower unemployment"),
             ("MANEMP",      0.15, +1, "ISM Mfg Employment — hiring lowers rate"),
             ("TEMPHELPS",   0.10, +1, "Temporary Help Services — leading hiring gauge"),
         ],
@@ -306,4 +306,242 @@ EVENTS = {
             ("AMTMNO",  0.10, +1, "Mfg New Orders — business capital investment proxy"),
         ],
     },
+    "CORE_PPI": {
+        "display_name": "Core PPI (ex. Food & Energy)",
+        "currency": "USD",
+        "history_series": "PPIFES",
+        "event_labels": {
+            "BULLISH": "HOT CORE PPI (Producer Pressure)",
+            "BEARISH": "COOL CORE PPI (Easing Upstream Costs)",
+            "INLINE": "INLINE (Neutral)",
+        },
+        "explanations": {
+            "BULLISH": "Core producer prices lean elevated. Upstream pricing pressure feeds into core consumer inflation, supporting USD.",
+            "BEARISH": "Core wholesale inflation decelerates, relieving Fed rate pressure and softening USD.",
+            "INLINE": "Core producer costs remain in line with consensus.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("PPIFES",       0.35, +1, "PPI Final Demand ex Food & Energy"),
+            ("DCOILWTICO",   0.25, +1, "WTI Crude Oil — baseline cost input"),
+            ("PPIFIS",       0.20, +1, "PPI Final Demand — pipeline pricing"),
+            ("PCUOMFGOMFG",  0.20, +1, "PPI Manufacturing Output"),
+        ],
+    },
+    "CORE_RETAIL_SALES": {
+        "display_name": "Core Retail Sales (ex. Auto & Gas)",
+        "currency": "USD",
+        "history_series": "RSXFS",
+        "event_labels": {
+            "BULLISH": "STRONG CORE CONSUMPTION",
+            "BEARISH": "COOLING CORE CONSUMPTION",
+            "INLINE": "INLINE CONSUMPTION",
+        },
+        "explanations": {
+            "BULLISH": "Core consumer spending excluding volatile auto/gas stays resilient, reinforcing USD yields.",
+            "BEARISH": "Core retail sales pull back, signaling household spending fatigue.",
+            "INLINE": "Core sales track market expectations.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("UMCSENT",  0.40, +1, "Consumer Sentiment — underlying spending appetite"),
+            ("IC4WSA",   0.30, -1, "4-Week Jobless Claims — employment stability"),
+            ("RSXFS",    0.30, +1, "Retail Sales ex Food Services"),
+        ],
+    },
+    "ISM_SERVICES": {
+        "display_name": "ISM Services PMI (Non-Mfg)",
+        "currency": "USD",
+        "history_series": "PPIFES",
+        "event_labels": {
+            "BULLISH": "EXPANDING SERVICES (Hot Services)",
+            "BEARISH": "CONTRACTING SERVICES (Services Slowdown)",
+            "INLINE": "INLINE SERVICES",
+        },
+        "explanations": {
+            "BULLISH": "Services sector expansion (~80% of US GDP) points to solid growth and sticky inflation, bullish for USD.",
+            "BEARISH": "Services PMI deceleration signals broader economic slowdown, weighing on USD.",
+            "INLINE": "Services activity aligns with expectations.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "BUY US500"],
+            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "SELL US500"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("PPIFES",  0.35, +1, "PPI Final Demand Services"),
+            ("SRVPRD",  0.35, +1, "Service-Providing Employment"),
+            ("UMCSENT", 0.30, +1, "Consumer Sentiment"),
+        ],
+    },
+    "AVG_HOURLY_EARNINGS": {
+        "display_name": "Average Hourly Earnings m/m",
+        "currency": "USD",
+        "history_series": "CES0500000003",
+        "event_labels": {
+            "BULLISH": "HOT WAGE GROWTH (Wage Inflation)",
+            "BEARISH": "COOLING WAGE GROWTH (Easing Inflation)",
+            "INLINE": "INLINE WAGE GROWTH",
+        },
+        "explanations": {
+            "BULLISH": "Accelerating wage growth sparks fears of wage-price spiral inflation, strengthening USD and Treasury yields.",
+            "BEARISH": "Decelerating wage pressure relieves inflation concerns, weighing on USD.",
+            "INLINE": "Wage growth tracks consensus.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / WATCH HEADLINE NFP"],
+        },
+        "indicators": [
+            ("CES0500000003", 0.40, +1, "Average Hourly Earnings Total Private"),
+            ("MANEMP",        0.30, +1, "ISM Mfg Employment"),
+            ("IC4WSA",        0.30, -1, "4-Week Avg Jobless Claims"),
+        ],
+    },
+    "ADP_NFP": {
+        "display_name": "ADP Non-Farm Employment Change",
+        "currency": "USD",
+        "history_series": "ADPWNUSNERSA",
+        "event_labels": {
+            "BULLISH": "STRONG PRIVATE HIRING",
+            "BEARISH": "WEAK PRIVATE HIRING",
+            "INLINE": "INLINE ADP HIRING",
+        },
+        "explanations": {
+            "BULLISH": "Solid private payrolls additions signal robust private sector hiring ahead of NFP, supporting USD.",
+            "BEARISH": "Soft ADP payrolls indicate private hiring deceleration, dragging USD lower.",
+            "INLINE": "ADP private payrolls match expectations.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / WATCH OFFICIAL NFP"],
+        },
+        "indicators": [
+            ("ADPWNUSNERSA", 0.50, +1, "ADP Private Employment"),
+            ("IC4WSA",       0.30, -1, "4-Week Avg Jobless Claims"),
+            ("JTSLDL",       0.20, -1, "Layoffs & Discharges"),
+        ],
+    },
+    "JOLTS": {
+        "display_name": "JOLTS Job Openings",
+        "currency": "USD",
+        "history_series": "JTSJOL",
+        "event_labels": {
+            "BULLISH": "HIGH JOB OPENINGS (Tight Labor)",
+            "BEARISH": "FALLING JOB OPENINGS (Cooling Labor)",
+            "INLINE": "STEADY JOB OPENINGS",
+        },
+        "explanations": {
+            "BULLISH": "Elevated job openings demonstrate strong worker demand, supporting USD strength.",
+            "BEARISH": "Declining job vacancies signal labor demand normalization, weighing on USD.",
+            "INLINE": "Job openings track expectations.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("IC4WSA",  0.40, -1, "4-Week Avg Jobless Claims"),
+            ("MANEMP",  0.30, +1, "ISM Mfg Employment"),
+            ("JTSLDL",  0.30, -1, "Layoffs & Discharges"),
+        ],
+    },
+    "CORE_PCE": {
+        "display_name": "Core PCE Price Index (Fed Preferred Inflation)",
+        "currency": "USD",
+        "history_series": "PCEPILFE",
+        "event_labels": {
+            "BULLISH": "HOT CORE PCE (Hawkish Fed)",
+            "BEARISH": "COOL CORE PCE (Fed Easing)",
+            "INLINE": "INLINE CORE PCE",
+        },
+        "explanations": {
+            "BULLISH": "The Fed's official benchmark inflation metric leans hot. Sticky core PCE forces the Fed to hold rates higher for longer, boosting USD yields.",
+            "BEARISH": "Core PCE price index decelerates toward the 2% target, strengthening Fed rate cut bets and pressuring USD.",
+            "INLINE": "Core PCE matches market consensus exactly.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD", "SELL GBPUSD"],
+            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD", "BUY GBPUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("PCEPILFE",  0.35, +1, "Core PCE Price Index — Fed target series"),
+            ("CPILFESL",  0.30, +1, "Core Consumer Price Index — consumer core proxy"),
+            ("PPIFES",    0.20, +1, "PPI Final Demand Services — service inflation driver"),
+            ("PPIACO",    0.15, +1, "PPI All Commodities — producer input cost"),
+        ],
+    },
+    "PCE": {
+        "display_name": "PCE Price Index (Headline)",
+        "currency": "USD",
+        "history_series": "PCEPI",
+        "event_labels": {
+            "BULLISH": "HOT HEADLINE PCE",
+            "BEARISH": "COOL HEADLINE PCE",
+            "INLINE": "INLINE HEADLINE PCE",
+        },
+        "explanations": {
+            "BULLISH": "Headline PCE inflation runs hot due to energy and services input pressure, driving USD upside.",
+            "BEARISH": "Headline PCE decelerates, relieving tightening pressure and weakening USD.",
+            "INLINE": "PCE headline tracks expectations.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("PCEPI",      0.35, +1, "Headline PCE Price Index"),
+            ("GASREGCOVW", 0.30, +1, "Retail Gasoline Prices — energy component"),
+            ("PPIFES",     0.20, +1, "PPI Final Demand Services"),
+            ("PPIACO",     0.15, +1, "PPI All Commodities"),
+        ],
+    },
 }
+
+
+def get_event_config(event_code: str) -> dict:
+    """Return event configuration with dynamic fallback for any unlisted code."""
+    code = (event_code or "").upper()
+    if code in EVENTS:
+        return EVENTS[code]
+
+    # Dynamic fallback configuration for unlisted red folder events
+    return {
+        "display_name": code.replace("_", " ").title(),
+        "currency": "USD",
+        "history_series": "INDPRO",
+        "event_labels": {
+            "BULLISH": f"BULLISH SURPRISE ({code})",
+            "BEARISH": f"BEARISH SURPRISE ({code})",
+            "INLINE": f"INLINE ({code})",
+        },
+        "explanations": {
+            "BULLISH": f"Leading indicators point to economic upside for {code}. Positive USD bias.",
+            "BEARISH": f"Leading indicators point to economic downside for {code}. Soft USD bias.",
+            "INLINE": f"{code} signals are balanced. Monitor actual release.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("INDPRO",  0.35, +1, "Industrial Production Index"),
+            ("IC4WSA",  0.35, -1, "4-Week Jobless Claims Avg"),
+            ("UMCSENT", 0.30, +1, "Consumer Sentiment"),
+        ],
+    }
+

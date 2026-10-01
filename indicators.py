@@ -21,14 +21,19 @@ import requests
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
-from config.events import EVENTS
+from config.events import EVENTS, get_event_config
 from database import IndicatorSnapshot, SessionLocal
 
 load_dotenv()
 log = logging.getLogger("indicators")
 
+import time
+
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 FRED_KEY  = os.getenv("FRED_API_KEY", "")
+
+_fred_cache: dict[str, tuple[float, Optional[pd.Series]]] = {}
+_FRED_CACHE_TTL = 3600  # 1 hour
 
 # ── Cleveland Fed CPI Nowcast (free, no API key) ──────────────────────────────
 CLEVELAND_FED_NOWCAST_URL = (
@@ -38,11 +43,19 @@ CLEVELAND_FED_NOWCAST_URL = (
 )
 
 
+
 def _fetch_fred_series(series_id: str, months: int = 12) -> Optional[pd.Series]:
-    """Pull a FRED series and return as a pandas Series indexed by date."""
+    """Pull a FRED series and return as a pandas Series indexed by date (cached for 1h)."""
     if not FRED_KEY:
         log.warning("FRED_API_KEY not set — cannot pull %s", series_id)
         return None
+
+    cache_key = f"{series_id}_{months}"
+    now_ts = time.time()
+    if cache_key in _fred_cache:
+        cached_ts, cached_series = _fred_cache[cache_key]
+        if (now_ts - cached_ts) < _FRED_CACHE_TTL:
+            return cached_series
 
     start = (datetime.utcnow() - timedelta(days=months * 31)).strftime("%Y-%m-%d")
     params = {
@@ -62,10 +75,14 @@ def _fetch_fred_series(series_id: str, months: int = 12) -> Optional[pd.Series]:
             if o["value"] not in (".", "")
         }
         if not data:
+            _fred_cache[cache_key] = (now_ts, None)
             return None
-        return pd.Series(data).sort_index()
+        series = pd.Series(data).sort_index()
+        _fred_cache[cache_key] = (now_ts, series)
+        return series
     except Exception as e:
         log.error("FRED fetch failed for %s: %s", series_id, e)
+        _fred_cache[cache_key] = (now_ts, None)
         return None
 
 
@@ -142,9 +159,7 @@ def pull_all_indicators_for_event(event_code: str) -> list[dict]:
     Pull and score all leading indicators for a given event.
     Saves snapshots to DB and returns list of scored indicator dicts.
     """
-    event = EVENTS.get(event_code)
-    if not event:
-        raise ValueError(f"Unknown event code: {event_code}")
+    event = get_event_config(event_code)
 
     db: Session = SessionLocal()
     scored = []
