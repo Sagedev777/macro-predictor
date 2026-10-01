@@ -2,9 +2,11 @@
 
 ## Updating an existing server
 
-Use `macro-predictor-server-update.zip` for an existing installation. Upload it to the current application root and extract it there, allowing the application files to be overwritten. It contains the updated backend and `dist/` frontend assets, but intentionally does not include `.env`, `passenger_wsgi.py`, `.htaccess`, the database, or the calendar cache. Those server-specific files and saved data will remain untouched.
+Use `macro-predictor-server-update.zip` for an existing installation. Upload it to the current application root and extract it there, allowing the application files to be overwritten. It contains the updated backend and `dist/` frontend assets, but does not include `.env`, `passenger_wsgi.py`, `.htaccess`, the database, or the calendar cache. Those files are not overwritten by the archive.
 
 Do not replace or delete the cPanel Python application, its virtual environment, or its existing environment variables. If `requirements.txt` has changed, install its dependencies using that application's existing virtual environment, then restart the Python application. Otherwise, extract the files and restart the application.
+
+On restart, the app adds a database marker for known demo rows and retains those rows without counting them in results. Only a forecast linked to its release and saved before that release can be graded; releases the app did not track are not added retroactively.
 
 After updating, visit `https://titanfxsage.omubedhe.com/api/health` to verify the app is responding.
 

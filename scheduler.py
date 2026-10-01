@@ -4,15 +4,20 @@ scheduler.py — Automatic background scheduler for pre-release alerts and post-
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 import json
-from database import SessionLocal, Prediction as PredictionModel, AlertLog, Release
-from config.events import EVENTS, get_event_config
+from database import (
+    SessionLocal,
+    Prediction as PredictionModel,
+    AlertLog,
+    is_pre_release_prediction,
+)
+from config.events import get_event_config
 from indicators import build_composite_score
 from calendar_feed import fetch_upcoming_red_folder_events
 from alerts import send_telegram_alert, BOT_TOKEN, CHAT_ID
@@ -155,6 +160,26 @@ def check_and_alert_upcoming():
                     log.info("Triggering automatic pre-release alert for %s (in %.1f hours)", code, hours_until)
                     try:
                         pred_result = build_composite_score(code)
+                        existing_prediction = db.query(PredictionModel).filter(
+                            PredictionModel.event_code == code,
+                            PredictionModel.release_time_utc == rel_str,
+                        ).first()
+                        if not existing_prediction:
+                            event_cfg = get_event_config(code)
+                            db.add(PredictionModel(
+                                created_at=now_utc,
+                                event_code=code,
+                                event_display_name=event_cfg.get("display_name", code),
+                                release_time_utc=rel_str,
+                                composite_score=pred_result["composite_score"],
+                                lean_direction=pred_result["lean_direction"],
+                                confidence_pct=pred_result["confidence_pct"],
+                                indicator_breakdown=json.dumps(pred_result["indicator_breakdown"]),
+                                forecast=ev.get("forecast"),
+                                previous=ev.get("previous"),
+                            ))
+                            db.commit()
+
                         # send telegram
                         send_telegram_alert(pred_result, release_time=f"{event_utc.strftime('%H:%M')} UTC (in {int(hours_until * 60)}m)")
                         # log
@@ -173,41 +198,13 @@ def check_and_alert_upcoming():
             actual = ev.get("actual")
             forecast = ev.get("forecast")
             if actual is not None and forecast is not None:
-                # Find recent prediction that hasn't been graded yet
                 recent_pred = db.query(PredictionModel).filter(
                     PredictionModel.event_code == code,
+                    PredictionModel.release_time_utc == rel_str,
                     PredictionModel.was_correct == None
                 ).order_by(PredictionModel.created_at.desc()).first()
 
-                if not recent_pred:
-                    already_graded = db.query(PredictionModel).filter(
-                        PredictionModel.event_code == code,
-                        PredictionModel.was_correct != None,
-                        PredictionModel.actual == actual,
-                    ).first()
-                    if already_graded:
-                        continue
-
-                    # Auto-generate prediction from leading indicators
-                    try:
-                        comp = build_composite_score(code)
-                        event_cfg = get_event_config(code)
-                        recent_pred = PredictionModel(
-                            event_code=code,
-                            event_display_name=event_cfg.get("display_name", code),
-                            composite_score=comp["composite_score"],
-                            lean_direction=comp["lean_direction"],
-                            confidence_pct=comp["confidence_pct"],
-                            indicator_breakdown=json.dumps(comp["indicator_breakdown"]),
-                        )
-                        db.add(recent_pred)
-                        db.commit()
-                        db.refresh(recent_pred)
-                    except Exception as err:
-                        log.warning("Could not auto-generate prediction for grading %s: %s", code, err)
-                        continue
-
-                if recent_pred:
+                if recent_pred and is_pre_release_prediction(recent_pred):
                     surprise = round(actual - forecast, 4)
                     lean = recent_pred.lean_direction
                     was_correct, verdict_msg = grade_prediction(code, lean, actual, forecast)

@@ -5,7 +5,6 @@ api.py — FastAPI backend serving prediction data, scheduler management, and hi
 import json
 import logging
 import os
-from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -15,7 +14,13 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from database import init_db, SessionLocal, Prediction as PredictionModel, AlertLog, Release
+from database import (
+    init_db,
+    is_pre_release_prediction,
+    SessionLocal,
+    Prediction as PredictionModel,
+    AlertLog,
+)
 from indicators import build_composite_score
 from calendar_feed import fetch_upcoming_red_folder_events, update_event_actual
 from alerts import send_telegram_alert, send_test_message
@@ -40,141 +45,9 @@ app.add_middleware(
 )
 
 
-def seed_sample_history_if_needed():
-    """Seed historical sample records so the user sees immediate past outcomes."""
-    db = SessionLocal()
-    try:
-        count = db.query(PredictionModel).filter(PredictionModel.was_correct != None).count()
-        if count == 0:
-            log.info("Seeding realistic historical predictions for backtesting & accuracy...")
-            sample_data = [
-                {
-                    "event_code": "NFP",
-                    "display": "Non-Farm Payrolls",
-                    "lean": "BEAT",
-                    "conf": 76.5,
-                    "score": 0.42,
-                    "forecast": 165.0,
-                    "previous": 142.0,
-                    "actual": 216.0,
-                    "correct": True,
-                    "date": datetime.utcnow() - timedelta(days=25),
-                },
-                {
-                    "event_code": "CPI",
-                    "display": "Consumer Price Index (CPI)",
-                    "lean": "BEAT",
-                    "conf": 72.0,
-                    "score": 0.38,
-                    "forecast": 3.1,
-                    "previous": 3.4,
-                    "actual": 3.2,
-                    "correct": True,
-                    "date": datetime.utcnow() - timedelta(days=18),
-                },
-                {
-                    "event_code": "CORE_CPI",
-                    "display": "Core CPI (ex. Food & Energy)",
-                    "lean": "MISS",
-                    "conf": 64.0,
-                    "score": -0.28,
-                    "forecast": 3.8,
-                    "previous": 3.9,
-                    "actual": 3.7,
-                    "correct": True,
-                    "date": datetime.utcnow() - timedelta(days=18),
-                },
-                {
-                    "event_code": "PPI",
-                    "display": "Producer Price Index (PPI)",
-                    "lean": "BEAT",
-                    "conf": 68.0,
-                    "score": 0.31,
-                    "forecast": 0.2,
-                    "previous": -0.1,
-                    "actual": 0.3,
-                    "correct": True,
-                    "date": datetime.utcnow() - timedelta(days=17),
-                },
-                {
-                    "event_code": "JOBLESS_CLAIMS",
-                    "display": "Weekly Initial Jobless Claims",
-                    "lean": "MISS",
-                    "conf": 74.0,
-                    "score": -0.35,
-                    "forecast": 222.0,
-                    "previous": 218.0,
-                    "actual": 215.0,
-                    "correct": True,
-                    "date": datetime.utcnow() - timedelta(days=12),
-                },
-                {
-                    "event_code": "UNEMPLOYMENT_RATE",
-                    "display": "Unemployment Rate (U3)",
-                    "lean": "INLINE",
-                    "conf": 52.0,
-                    "score": 0.05,
-                    "forecast": 4.1,
-                    "previous": 4.1,
-                    "actual": 4.2,
-                    "correct": False,
-                    "date": datetime.utcnow() - timedelta(days=25),
-                },
-                {
-                    "event_code": "RETAIL_SALES",
-                    "display": "Retail Sales",
-                    "lean": "BEAT",
-                    "conf": 70.0,
-                    "score": 0.34,
-                    "forecast": 0.3,
-                    "previous": 0.1,
-                    "actual": 0.4,
-                    "correct": True,
-                    "date": datetime.utcnow() - timedelta(days=14),
-                },
-                {
-                    "event_code": "CONSUMER_CONFIDENCE",
-                    "display": "Consumer Confidence",
-                    "lean": "BEAT",
-                    "conf": 67.5,
-                    "score": 0.29,
-                    "forecast": 99.0,
-                    "previous": 98.7,
-                    "actual": 100.3,
-                    "correct": True,
-                    "date": datetime.utcnow() - timedelta(days=9),
-                },
-            ]
-
-            for s in sample_data:
-                surprise = s["actual"] - s["forecast"]
-                pred = PredictionModel(
-                    created_at=s["date"],
-                    event_code=s["event_code"],
-                    event_display_name=s["display"],
-                    composite_score=s["score"],
-                    lean_direction=s["lean"],
-                    confidence_pct=s["conf"],
-                    forecast=s["forecast"],
-                    previous=s["previous"],
-                    actual=s["actual"],
-                    surprise=round(surprise, 3),
-                    actual_surprise=round(surprise, 3),
-                    was_correct=s["correct"],
-                    indicator_breakdown=json.dumps([]),
-                )
-                db.add(pred)
-            db.commit()
-    except Exception as e:
-        log.error("Failed to seed sample history: %s", e)
-    finally:
-        db.close()
-
-
 @app.on_event("startup")
 def startup():
     init_db()
-    seed_sample_history_if_needed()
     start_scheduler()
     log.info("MacroPredictor API started with automatic background scheduler active")
 
@@ -226,51 +99,34 @@ def sync_actuals_from_feed():
             code = ev.get("event_code")
             actual = ev.get("actual")
             forecast = ev.get("forecast")
+            release_time_utc = ev.get("release_time_utc")
 
-            if not code or actual is None or forecast is None:
+            if not code or actual is None or forecast is None or not release_time_utc:
                 continue
 
             event_cfg = get_event_config(code)
 
-            # Check if this event already has a graded prediction
             existing_graded = db.query(PredictionModel).filter(
                 PredictionModel.event_code == code,
+                PredictionModel.release_time_utc == release_time_utc,
                 PredictionModel.was_correct != None,
-                PredictionModel.actual == actual,
             ).first()
 
             if existing_graded:
-                continue  # Already graded with this exact actual — skip
+                continue
 
-            # Find the most recent ungraded prediction
             pred = (
                 db.query(PredictionModel)
                 .filter(
                     PredictionModel.event_code == code,
+                    PredictionModel.release_time_utc == release_time_utc,
                     PredictionModel.was_correct == None,
                 )
                 .order_by(PredictionModel.created_at.desc())
                 .first()
             )
-
-            if not pred:
-                # No ungraded prediction exists — create one from the model now
-                try:
-                    comp = build_composite_score(code)
-                    pred = PredictionModel(
-                        event_code=code,
-                        event_display_name=event_cfg.get("display_name", code),
-                        composite_score=comp["composite_score"],
-                        lean_direction=comp["lean_direction"],
-                        confidence_pct=comp["confidence_pct"],
-                        indicator_breakdown=json.dumps(comp["indicator_breakdown"]),
-                    )
-                    db.add(pred)
-                    db.commit()
-                    db.refresh(pred)
-                except Exception as e:
-                    log.warning("Could not create prediction for %s: %s", code, e)
-                    continue
+            if not pred or not is_pre_release_prediction(pred):
+                continue
 
             # Grade it
             was_correct, verdict_msg = grade_prediction(code, pred.lean_direction, actual, forecast)
@@ -376,13 +232,13 @@ class RecordActualPayload(BaseModel):
     event_name: Optional[str] = None
     actual: float
     forecast: Optional[float] = None
+    release_time_utc: Optional[str] = None
 
 
 @app.post("/api/events/record-actual")
 def record_actual_api(payload: RecordActualPayload):
     """
-    Record an actual release print, update calendar caches, and grade
-    the model's prediction directly into the honest historical ledger.
+    Record an actual release print and grade only a linked pre-release forecast.
     """
     code = payload.event_code.upper() if payload.event_code else None
 
@@ -398,47 +254,59 @@ def record_actual_api(payload: RecordActualPayload):
             "message": "Recorded actual print in calendar cache."
         }
 
-    event_cfg = get_event_config(code)
+    if not payload.release_time_utc:
+        return {
+            "success": True,
+            "event_code": code,
+            "actual": payload.actual,
+            "graded": False,
+            "message": "Actual recorded; no release time was supplied to match a saved forecast.",
+        }
 
-    # 2. Find or calculate pre-release prediction
     db = SessionLocal()
     try:
         pred = (
             db.query(PredictionModel)
             .filter(
                 PredictionModel.event_code == code,
+                PredictionModel.release_time_utc == payload.release_time_utc,
                 PredictionModel.was_correct == None
             )
             .order_by(PredictionModel.created_at.desc())
             .first()
         )
 
-        if not pred:
-            # Generate pre-release model prediction if not already in DB
-            comp = build_composite_score(code)
-            pred = PredictionModel(
-                event_code=code,
-                event_display_name=event_cfg.get("display_name", code),
-                composite_score=comp["composite_score"],
-                lean_direction=comp["lean_direction"],
-                confidence_pct=comp["confidence_pct"],
-                indicator_breakdown=json.dumps(comp["indicator_breakdown"]),
-            )
-            db.add(pred)
-            db.commit()
-            db.refresh(pred)
+        if not pred or not is_pre_release_prediction(pred):
+            return {
+                "success": True,
+                "event_code": code,
+                "actual": payload.actual,
+                "graded": False,
+                "message": "Actual recorded; no saved pre-release forecast matches this release.",
+            }
 
-        # 3. Determine forecast
+        # Use the forecast paired with this release, not another event's forecast.
         forecast = payload.forecast
         if forecast is None:
             for ev in fetch_upcoming_red_folder_events():
-                if ev.get("event_code") == code and ev.get("forecast") is not None:
+                if (
+                    ev.get("event_code") == code
+                    and ev.get("release_time_utc") == payload.release_time_utc
+                    and ev.get("forecast") is not None
+                ):
                     forecast = ev.get("forecast")
                     break
         if forecast is None:
-            forecast = pred.forecast or 0.0
+            forecast = pred.forecast
+        if forecast is None:
+            return {
+                "success": True,
+                "event_code": code,
+                "actual": payload.actual,
+                "graded": False,
+                "message": "Actual recorded; forecast data is unavailable, so this release was not graded.",
+            }
 
-        # 4. Strict mathematical evaluation
         was_correct, verdict_msg = grade_prediction(code, pred.lean_direction, payload.actual, forecast)
         surprise = round(payload.actual - forecast, 4)
 
@@ -449,7 +317,6 @@ def record_actual_api(payload: RecordActualPayload):
         pred.was_correct = was_correct
         db.commit()
 
-        # 5. Send outcome alert to Telegram
         try:
             send_outcome_alert(code, payload.actual, forecast, was_correct, pred.lean_direction, verdict_explanation=verdict_msg)
         except Exception as te:
@@ -464,6 +331,7 @@ def record_actual_api(payload: RecordActualPayload):
             "surprise": surprise,
             "lean_direction": pred.lean_direction,
             "was_correct": was_correct,
+            "graded": True,
             "verdict": verdict_msg,
         }
     finally:
@@ -556,6 +424,7 @@ def list_predictions(limit: int = 30):
     db = SessionLocal()
     all_preds = (
         db.query(PredictionModel)
+        .filter(PredictionModel.is_sample.is_(False))
         .order_by(PredictionModel.created_at.desc())
         .all()
     )
@@ -601,15 +470,21 @@ def list_predictions(limit: int = 30):
 
 @app.get("/api/history")
 def get_historical_outcomes(limit: int = 30):
-    """Return past predictions paired with actual released numbers and outcomes."""
+    """Return outcomes for forecasts saved before their scheduled release."""
     db = SessionLocal()
-    graded_preds = (
+    candidates = (
         db.query(PredictionModel)
-        .filter(PredictionModel.was_correct != None)
+        .filter(
+            PredictionModel.was_correct != None,
+            PredictionModel.is_sample.is_(False),
+        )
         .order_by(PredictionModel.created_at.desc())
-        .limit(limit)
         .all()
     )
+    graded_preds = [
+        prediction for prediction in candidates
+        if is_pre_release_prediction(prediction)
+    ][:max(0, limit)]
     db.close()
 
     total = len(graded_preds)
@@ -635,7 +510,7 @@ def get_historical_outcomes(limit: int = 30):
                 "surprise": p.surprise,
                 "was_correct": p.was_correct,
                 "trade_signals": EVENTS.get(p.event_code, {}).get("trade_signals", {}).get(p.lean_direction, []),
-                "date": p.created_at.isoformat() if p.created_at else None,
+                "date": p.release_time_utc,
             }
             for p in graded_preds
         ],
@@ -644,13 +519,20 @@ def get_historical_outcomes(limit: int = 30):
 
 @app.get("/api/accuracy")
 def get_overall_accuracy():
-    """Return global hit rate stats plus per-event breakdown."""
+    """Return accuracy for non-sample forecasts saved before their release."""
     db = SessionLocal()
-    all_graded = (
+    candidates = (
         db.query(PredictionModel)
-        .filter(PredictionModel.was_correct != None)
+        .filter(
+            PredictionModel.was_correct != None,
+            PredictionModel.is_sample.is_(False),
+        )
         .all()
     )
+    all_graded = [
+        prediction for prediction in candidates
+        if is_pre_release_prediction(prediction)
+    ]
     db.close()
 
     total = len(all_graded)
@@ -739,4 +621,3 @@ def test_telegram():
 _dist = os.path.join(os.path.dirname(__file__), "dist")
 if os.path.isdir(_dist):
     app.mount("/", StaticFiles(directory=_dist, html=True), name="static")
-

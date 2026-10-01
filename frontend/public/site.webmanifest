@@ -1,7 +1,7 @@
 {
   "name": "TitanFX Sage — Macro Predictor",
   "short_name": "TitanFX Sage",
-  "description": "Trade With Logic. Code Your Edge. Master The Market.",
+  "description": "Economic calendar and pre-release forecasts for USD economic releases.",
   "icons": [
     { "src": "/android-chrome-192x192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/android-chrome-512x512.png", "sizes": "512x512", "type": "image/png" }

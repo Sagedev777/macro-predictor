@@ -235,6 +235,18 @@ function getSurpriseLabel(eventCode: string, surprise: number | null): string {
   return `${numStr} (${isPositive ? '✅ USD+' : '❌ USD−'})`
 }
 
+function getForecastDirectionLabel(eventCode: string, direction: string): string {
+  if (direction === 'INLINE') return 'Near forecast'
+  if (direction !== 'BEAT' && direction !== 'MISS' && direction !== 'BULLISH' && direction !== 'BEARISH') {
+    return 'Not available'
+  }
+
+  const expectsHigher = INVERSE_EVENTS.has(eventCode)
+    ? direction === 'MISS' || direction === 'BEARISH'
+    : direction === 'BEAT' || direction === 'BULLISH'
+  return expectsHigher ? 'Higher reading' : 'Lower reading'
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Indicator {
   fred_series: string
@@ -1469,23 +1481,22 @@ export default function App() {
                   v3.0
                 </span>
               </div>
-              <p className="text-xs text-slate-400 font-mono mt-0.5">Trade With Logic. Code Your Edge. Master The Market.</p>
+              <p className="text-xs text-slate-400 mt-0.5">Economic calendar and pre-release forecasts</p>
             </div>
           </div>
 
-          {/* Product positioning */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 text-emerald-300">
               <TrendingUp className="w-3 h-3" />
-              Macro Intelligence
+              Economic calendar
             </span>
             <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border border-cyan-500/20 bg-cyan-500/10 text-cyan-300">
               <Calendar className="w-3 h-3" />
-              Market Radar
+              Pre-release forecasts
             </span>
             <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border border-amber-500/20 bg-amber-500/10 text-amber-300">
               <Award className="w-3 h-3" />
-              Decision Journal
+              Release history
             </span>
           </div>
         </header>
@@ -1542,8 +1553,7 @@ export default function App() {
             }`}
           >
             <Award className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            <span>Accuracy</span>
-            <span className="hidden sm:inline"> ({accuracy?.overall_hit_rate ?? 0}%)</span>
+            <span>Results</span>
           </button>
 
           <button
@@ -1943,41 +1953,45 @@ export default function App() {
         {activeTab === 'accuracy' && (
           <div className="space-y-6">
             {/* Top Stat Summary Cards */}
-            {accuracy && (
+            {accuracy && accuracy.total_predictions > 0 && (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div className="glass p-4 border border-indigo-500/20">
-                  <p className="text-xs text-slate-400 uppercase font-semibold">Overall Hit Rate</p>
+                  <p className="text-xs text-slate-400 uppercase font-semibold">Recorded accuracy</p>
                   <p className="text-2xl font-black text-indigo-400 font-mono mt-1">{accuracy.overall_hit_rate}%</p>
-                  <p className="text-[10px] text-slate-500 mt-1">Across all graded releases</p>
+                  <p className="text-[10px] text-slate-500 mt-1">Of {accuracy.total_predictions} tracked releases</p>
                 </div>
                 <div className="glass p-4 border border-emerald-500/20">
-                  <p className="text-xs text-slate-400 uppercase font-semibold">Correct Predictions</p>
+                  <p className="text-xs text-slate-400 uppercase font-semibold">Correct</p>
                   <p className="text-2xl font-black text-emerald-400 font-mono mt-1">{accuracy.wins}</p>
-                  <p className="text-[10px] text-slate-500 mt-1">Confirmed by actual prints</p>
+                  <p className="text-[10px] text-slate-500 mt-1">Matched the release outcome</p>
                 </div>
                 <div className="glass p-4 border border-red-500/20">
-                  <p className="text-xs text-slate-400 uppercase font-semibold">Missed Predictions</p>
+                  <p className="text-xs text-slate-400 uppercase font-semibold">Incorrect</p>
                   <p className="text-2xl font-black text-red-400 font-mono mt-1">{accuracy.losses}</p>
-                  <p className="text-[10px] text-slate-500 mt-1">Market surprised model</p>
+                  <p className="text-[10px] text-slate-500 mt-1">Did not match the release outcome</p>
                 </div>
                 <div className="glass p-4 border border-cyan-500/20">
-                  <p className="text-xs text-slate-400 uppercase font-semibold">Total Sample</p>
+                  <p className="text-xs text-slate-400 uppercase font-semibold">Releases counted</p>
                   <p className="text-2xl font-black text-cyan-400 font-mono mt-1">{accuracy.total_predictions}</p>
-                  <p className="text-[10px] text-slate-500 mt-1">Tracked releases</p>
+                  <p className="text-[10px] text-slate-500 mt-1">With a saved pre-release forecast</p>
                 </div>
+              </div>
+            )}
+            {accuracy && accuracy.total_predictions === 0 && (
+              <div className="glass p-4 border border-white/10 text-sm text-slate-300">
+                No verified release results yet. A forecast is counted only when it was saved before its scheduled release.
               </div>
             )}
 
             {/* Per-event breakdown table */}
             {accuracy && accuracy.event_stats.length > 0 && (
               <div className="glass p-5 border border-white/5">
-                <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-3">Accuracy by News Event</h4>
+                <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-3">Results by release</h4>
                 <div className="space-y-2">
                   {accuracy.event_stats.map((st, i) => (
                     <div key={i} className="flex items-center justify-between py-2 border-b border-white/5 last:border-0">
                       <div>
                         <p className="text-sm font-bold text-slate-200">{st.display_name}</p>
-                        <p className="text-[10px] text-slate-500 font-mono">{st.event_code}</p>
                       </div>
                       <div className="flex items-center gap-4">
                         <span className="text-xs text-slate-400 font-mono">
@@ -1997,122 +2011,111 @@ export default function App() {
             <div className="glass p-5 border border-white/5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
                 <div>
-                  <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-0.5">Past Predictions vs Actuals — Honest Ledger</h4>
-                  <p className="text-[11px] text-slate-500">Zero falsification. Every incorrect prediction is recorded as a loss. No missed call is labelled correct.</p>
+                  <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-0.5">Tracked forecasts and actual releases</h4>
+                  <p className="text-[11px] text-slate-500">
+                    Only forecasts saved before a scheduled release are counted. This list covers releases recorded by this app; it is not a complete news archive.
+                  </p>
                 </div>
                 <button
                   onClick={() => { fetchHistory(); fetchPredictions() }}
                   className="px-3 py-1.5 rounded-xl glass-sm hover:bg-white/10 text-slate-400 hover:text-white transition-all flex items-center gap-1.5 text-xs font-semibold self-start sm:self-auto flex-shrink-0"
-                  title="Refresh accuracy statistics and ledger"
+                  title="Reload release results"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Refresh Ledger</span>
+                  <span>Refresh results</span>
                 </button>
               </div>
-              <div className="space-y-3">
-                {historyItems.map((item) => {
-                  const surpriseColor = getSurpriseColor(item.event_code, item.surprise)
-                  const surpriseLabel = getSurpriseLabel(item.event_code, item.surprise)
-                  const isInverse = INVERSE_EVENTS.has(item.event_code)
+              {historyItems.length === 0 ? (
+                <p className="text-sm text-slate-400">
+                  No tracked releases to show yet. Releases missed while the app was offline will not appear here.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {historyItems.map((item) => {
+                    const surpriseColor = getSurpriseColor(item.event_code, item.surprise)
+                    const surpriseLabel = getSurpriseLabel(item.event_code, item.surprise)
 
-                  // Build the human-readable honest verdict
-                  let verdictText = ''
-                  if (item.was_correct === true) {
-                    verdictText = `Model predicted ${item.lean_direction} and the actual print (${item.actual}) ${isInverse ? 'was lower than' : 'exceeded'} forecast (${item.forecast}). Correct call.`
-                  } else if (item.was_correct === false) {
-                    const direction = item.surprise != null
-                      ? (isInverse
-                          ? (item.surprise < 0 ? 'LOWER (USD bullish surprise)' : 'HIGHER (USD bearish surprise)')
-                          : (item.surprise > 0 ? 'HIGHER (USD bullish surprise)' : 'LOWER (USD bearish surprise)'))
-                      : 'different from forecast'
-                    verdictText = `Model predicted ${item.lean_direction} but actual (${item.actual}) came in ${direction} than forecast (${item.forecast}). Prediction was WRONG — recorded as a loss.`
-                  } else {
-                    verdictText = 'Awaiting actual release data to grade this prediction.'
-                  }
+                    let verdictText = ''
+                    const actualVsForecast = item.surprise == null || item.surprise === 0
+                      ? 'matched the forecast'
+                      : item.surprise > 0 ? 'was above the forecast' : 'was below the forecast'
+                    if (item.was_correct === true) {
+                      verdictText = `Actual ${item.actual} ${actualVsForecast} of ${item.forecast}. This forecast was graded correct.`
+                    } else if (item.was_correct === false) {
+                      verdictText = `Actual ${item.actual} ${actualVsForecast} of ${item.forecast}. This forecast was graded incorrect.`
+                    }
 
-                  return (
-                    <div key={item.id} className={`glass-sm p-4 border flex flex-col gap-3 ${
-                      item.was_correct === true ? 'border-emerald-500/20 bg-emerald-950/10' :
-                      item.was_correct === false ? 'border-red-500/20 bg-red-950/10' :
-                      'border-white/5'
-                    }`}>
-                      {/* Row 1: info + numbers + verdict badge */}
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                        <div>
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">
-                              {item.event_code}
-                            </span>
-                            {isInverse && (
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 uppercase">
-                                ⚠ Inverse Event
-                              </span>
-                            )}
-                            <span className="text-xs text-slate-500">
-                              {new Date(item.date).toLocaleDateString()}
-                            </span>
-                          </div>
-                          <h5 className="text-sm font-bold text-white">{item.display_name}</h5>
-                          <div className="flex items-center gap-2 mt-1">
-                            <span className="text-xs text-slate-400">Pre-Release Lean:</span>
-                            <span className={`text-xs font-bold ${
-                              item.lean_direction === 'BEAT' || item.lean_direction === 'BULLISH' ? 'text-emerald-400' :
-                              item.lean_direction === 'MISS' || item.lean_direction === 'BEARISH' ? 'text-red-400' : 'text-amber-400'
-                            }`}>
-                              {item.lean_direction} ({item.confidence_pct.toFixed(0)}% confidence)
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-4 flex-wrap">
-                          <div className="text-right">
-                            <p className="text-[10px] text-slate-500 uppercase">Forecast</p>
-                            <p className="text-xs font-mono font-bold text-slate-300">{item.forecast ?? '—'}</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-[10px] text-slate-500 uppercase">Actual</p>
-                            <p className="text-xs font-mono font-bold text-white">{item.actual ?? '—'}</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-[10px] text-slate-500 uppercase">Surprise</p>
-                            <p className="text-xs font-mono font-bold" style={{ color: surpriseColor }}>
-                              {surpriseLabel}
-                            </p>
-                          </div>
-                          <div>
-                            {item.was_correct === true && (
-                              <span className="flex items-center gap-1 text-xs font-black px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                                <CheckCircle className="w-3.5 h-3.5" /> CORRECT
-                              </span>
-                            )}
-                            {item.was_correct === false && (
-                              <span className="flex items-center gap-1 text-xs font-black px-3 py-1.5 rounded-lg bg-red-500/20 text-red-400 border border-red-500/30">
-                                <AlertCircle className="w-3.5 h-3.5" /> WRONG
-                              </span>
-                            )}
-                            {item.was_correct === null && (
-                              <span className="flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-500/10 text-slate-400 border border-slate-500/20">
-                                <Clock className="w-3.5 h-3.5" /> PENDING
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Row 2: Honest verdict explanation */}
-                      <div className={`text-[11px] leading-relaxed px-3 py-2 rounded-lg border-l-2 ${
-                        item.was_correct === true
-                          ? 'border-emerald-500 bg-emerald-950/20 text-emerald-300'
-                          : item.was_correct === false
-                          ? 'border-red-500 bg-red-950/20 text-red-300'
-                          : 'border-slate-600 bg-slate-900/30 text-slate-400'
+                    return (
+                      <div key={item.id} className={`glass-sm p-4 border flex flex-col gap-3 ${
+                        item.was_correct === true ? 'border-emerald-500/20 bg-emerald-950/10' :
+                        item.was_correct === false ? 'border-red-500/20 bg-red-950/10' :
+                        'border-white/5'
                       }`}>
-                        {verdictText}
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-xs text-slate-500">
+                                {new Date(item.date).toLocaleDateString()}
+                              </span>
+                            </div>
+                            <h5 className="text-sm font-bold text-white">{item.display_name}</h5>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="text-xs text-slate-400">Before release:</span>
+                              <span className="text-xs font-bold text-slate-200">
+                                {getForecastDirectionLabel(item.event_code, item.lean_direction)}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-4 flex-wrap">
+                            <div className="text-right">
+                              <p className="text-[10px] text-slate-500 uppercase">Forecast</p>
+                              <p className="text-xs font-mono font-bold text-slate-300">{item.forecast ?? '—'}</p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[10px] text-slate-500 uppercase">Actual</p>
+                              <p className="text-xs font-mono font-bold text-white">{item.actual ?? '—'}</p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[10px] text-slate-500 uppercase">Difference</p>
+                              <p className="text-xs font-mono font-bold" style={{ color: surpriseColor }}>
+                                {surpriseLabel}
+                              </p>
+                            </div>
+                            <div>
+                              {item.was_correct === true && (
+                                <span className="flex items-center gap-1 text-xs font-black px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                  <CheckCircle className="w-3.5 h-3.5" /> CORRECT
+                                </span>
+                              )}
+                              {item.was_correct === false && (
+                                <span className="flex items-center gap-1 text-xs font-black px-3 py-1.5 rounded-lg bg-red-500/20 text-red-400 border border-red-500/30">
+                                  <AlertCircle className="w-3.5 h-3.5" /> WRONG
+                                </span>
+                              )}
+                              {item.was_correct === null && (
+                                <span className="flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-500/10 text-slate-400 border border-slate-500/20">
+                                  <Clock className="w-3.5 h-3.5" /> PENDING
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className={`text-[11px] leading-relaxed px-3 py-2 rounded-lg border-l-2 ${
+                          item.was_correct === true
+                            ? 'border-emerald-500 bg-emerald-950/20 text-emerald-300'
+                            : item.was_correct === false
+                            ? 'border-red-500 bg-red-950/20 text-red-300'
+                            : 'border-slate-600 bg-slate-900/30 text-slate-400'
+                        }`}>
+                          {verdictText}
+                        </div>
                       </div>
-                    </div>
-                  )
-                })}
-              </div>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           </div>
         )}
