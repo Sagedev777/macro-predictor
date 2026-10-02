@@ -1,8 +1,40 @@
-apscheduler>=3.10,<4
-a2wsgi>=1.10,<2
+# ── Core web framework ────────────────────────────────────────────────────────
 fastapi>=0.115,<1
+a2wsgi>=1.10,<2            # WSGI adapter for cPanel/Passenger hosting
+
+# ── Task scheduling ───────────────────────────────────────────────────────────
+apscheduler>=3.10,<4
+
+# ── Data / numerics ──────────────────────────────────────────────────────────
 numpy>=1.26,<3
 pandas>=2.2,<3
-python-dotenv>=1,<2
+pandas-ta>=0.3.14b         # ATR(14) and other technical indicators
+
+# ── HTTP / feeds ─────────────────────────────────────────────────────────────
 requests>=2.31,<3
+feedparser>=6.0,<7         # RSS parsing (ForexLive, FXStreet, central bank feeds)
+
+# ── GDELT news sourcing ───────────────────────────────────────────────────────
+gdeltdoc>=1.1,<2           # GDELT 2.0 API wrapper — free, no key
+
+# ── CFTC Commitment of Traders ────────────────────────────────────────────────
+cot_reports>=0.2           # Auto-downloads and parses official CFTC weekly COT
+
+# ── Database ─────────────────────────────────────────────────────────────────
 sqlalchemy>=2,<3
+
+# ── Online / streaming machine learning ──────────────────────────────────────
+river>=0.21,<1             # ARFClassifier (Adaptive Random Forest) — concept-drift aware
+
+# ── NLP / Sentiment (FinBERT) ────────────────────────────────────────────────
+# NOTE: torch CPU-only wheel. Switch to torch with CUDA extras if GPU is available.
+torch>=2.2,<3              # PyTorch — required by transformers; CPU inference is fine
+transformers>=4.40,<5      # Hugging Face transformers — loads ProsusAI/finbert
+
+# ── Environment / config ─────────────────────────────────────────────────────
+python-dotenv>=1,<2
+
+# ── New account required (see .env.example) ──────────────────────────────────
+# Twelve Data free tier: 800 calls/day, 8/min — register at twelvedata.com
+# TWELVE_DATA_API_KEY must be set in .env before price_data.py functions work.
+# No other new paid/account dependencies exist — all other sources are open/free.

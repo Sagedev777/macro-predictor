@@ -1,29 +1,185 @@
-# cPanel Deployment
+# MacroPredictor v3 — Deployment Guide
 
-## Updating an existing server
+## Prerequisites
 
-Use `macro-predictor-server-update.zip` for an existing installation. Upload it to the current application root and extract it there, allowing the application files to be overwritten. It contains the updated backend and `dist/` frontend assets, but does not include `.env`, `passenger_wsgi.py`, `.htaccess`, the database, or the calendar cache. Those files are not overwritten by the archive.
+- Python 3.11+
+- Node.js 20+ / npm
+- cPanel hosting with Passenger WSGI support (current setup: titanfxsage.omubedhe.com)
+- ~2 GB free disk space (FinBERT model weights: ~440 MB)
+- ~1.5 GB free RAM (FinBERT CPU inference)
 
-Do not replace or delete the cPanel Python application, its virtual environment, or its existing environment variables. If `requirements.txt` has changed, install its dependencies using that application's existing virtual environment, then restart the Python application. Otherwise, extract the files and restart the application.
+---
 
-On restart, the app adds a database marker for known demo rows and retains those rows without counting them in results. Only a forecast linked to its release and saved before that release can be graded; releases the app did not track are not added retroactively.
+## Environment Setup
 
-After updating, visit `https://titanfxsage.omubedhe.com/api/health` to verify the app is responding.
+### 1. Copy and fill in environment variables
 
-## Fresh installation
+```bash
+cp .env.example .env
+```
 
-This archive is for cPanel hosting with **Setup Python App** (Passenger) enabled. The Python application root is a private application folder; the Application URL maps that app to `titanfxsage.omubedhe.com`.
+Edit `.env` and set:
+- `FRED_API_KEY` — get free at https://fred.stlouisfed.org/docs/api/api_key.html
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — from @BotFather
+- `TWELVE_DATA_API_KEY` — **new for v3**, register free at https://twelvedata.com/register
 
-1. In cPanel **Domains**, make sure `titanfxsage.omubedhe.com` exists as a domain/subdomain on this hosting account.
-2. In **Setup Python App**, choose Python 3.11 or newer, set the application root to a private folder named `titanfxsage.omubedhe.com` (outside `public_html`), and select `https://titanfxsage.omubedhe.com` as the Application URL with no extra URI path. Note the virtual environment cPanel creates.
-3. Upload this ZIP into the application root and extract it there. The files should sit directly in the root, with `passenger_wsgi.py` and `dist/` visible (not inside another `macro-predictor/` folder).
-4. Install dependencies with `pip install -r requirements.txt` using the application's virtual environment.
-5. In **Environment variables**, add `FRED_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `ALERT_HOURS_BEFORE` (use `2` for the last value). Enter your own credentials; do not share them. Alternatively, create `.env` in the application root from `.env.example`.
-6. Set the startup file to `passenger_wsgi.py`, the entry point to `application`, then restart the Python application.
-7. Visit `https://titanfxsage.omubedhe.com/api/health` to verify the app is responding.
+---
 
-If the Application URL selector says **No result found**, leave setup and add the subdomain under cPanel **Domains** first, then return to **Setup Python App** and refresh. If the subdomain already appears under Domains but not in the selector, ask the host to enable/map Python Selector (Passenger) for that subdomain. If the Python version list is empty, the hosting plan does not currently offer Python apps; the host must enable it or the app needs a VPS/Python-capable host.
+### 2. Install Python dependencies
 
-Keep the application root writable: SQLite data and the calendar cache are stored there. Do not delete `macro_predictor.db` after the app has started, or its saved predictions will be lost. Do not place backend source or `.env` in the public document root.
+```bash
+cd /path/to/macro-predictor
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-This setup keeps the web app running under Passenger, but shared-hosting providers may suspend or restart Python processes and may not guarantee background scheduler uptime. For dependable 24/7 scheduled alerts, use a VPS or a hosting plan that guarantees persistent Python workers, and configure a single application worker so the in-process scheduler is not duplicated.
+**First-run note on torch:** `torch` is a large package (~800 MB wheel). If disk space is tight, install the CPU-only wheel explicitly:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+```
+
+**First-run note on FinBERT:** The `ProsusAI/finbert` model weights (~440 MB) download automatically from HuggingFace on the first call to `sentiment.py`. This happens once and is cached in `~/.cache/huggingface/`. Subsequent starts use the local cache.
+
+---
+
+### 3. Build the React frontend
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+The built assets land in `frontend/dist/`. The FastAPI app serves them from `dist/` at the root path (configured in `api.py`).
+
+---
+
+### 4. Initialise the database
+
+The database auto-migrates on startup. No manual migration step is needed. The existing `macro_predictor.db` historical ledger is preserved — new tables and columns are added non-destructively via `init_db()`.
+
+---
+
+### 5. Start the server
+
+#### Development
+
+```bash
+# Backend (in one terminal)
+uvicorn api:app --reload --port 8000
+
+# Frontend dev server (optional, in another terminal)
+cd frontend && npm run dev
+```
+
+The Vite dev server proxies `/api` to `localhost:8000` automatically.
+
+#### Production (cPanel / Passenger)
+
+The existing `passenger_wsgi.py` works unchanged — Passenger imports `api:app` and serves it. Ensure your cPanel Python app is pointing at the venv.
+
+```python
+# passenger_wsgi.py (existing — no changes needed)
+from api import app as application
+```
+
+Restart the app from cPanel after deploying to pick up the new code.
+
+---
+
+## First-Run Sequence
+
+On the very first startup after deployment:
+
+1. `init_db()` creates all new tables and migrates existing columns.
+2. `_maybe_seed_models()` seeds the 8 River ARF models with COT + rate-differential priors (10 synthetic samples each). This requires the DB to have at least one rate-differential and COT snapshot. If those haven't run yet, the models start from equal-weight priors and the first real `learn_one()` calls begin building genuine signal.
+3. The scheduler fires its first `check_and_alert_upcoming()` within 5 minutes.
+4. Rate differentials and currency strengths are computed on the first 06:00/07:00 UTC cron fire (or manually via `POST /api/run-full-cycle`).
+5. FinBERT downloads weights on the first 00:30 UTC sentiment cron (or manually via `POST /api/run-full-cycle`). Expect ~5–10 minutes for the download on a typical VPS.
+
+To bootstrap everything immediately without waiting for cron:
+
+```bash
+curl -X POST https://titanfxsage.omubedhe.com/api/run-full-cycle
+```
+
+---
+
+## Twelve Data Rate Limit Management
+
+Free tier: 800 calls/day, 8 calls/min.
+
+`price_data.py` enforces a 7.5-second delay between Twelve Data calls. With 13 canonical pairs × 1 OHLC fetch each = 13 calls per order-suggestion cycle. Budget:
+- 13 pairs × 2 calls (OHLC + ATR) = 26 calls per full event cycle
+- Running order suggestions for 5 events per day ≈ 130 calls
+- Well within the 800/day free limit
+
+Order suggestions are cached in the `pair_suggestions` DB table and served from cache on repeat `/api/order-suggestion/{event}` requests.
+
+---
+
+## Monitoring
+
+### Health check
+
+```
+GET /api/health
+```
+
+Returns `fred_configured`, `telegram_configured`, `twelve_data_configured` booleans.
+
+### Manual scheduler trigger
+
+```
+POST /api/scheduler/check-now
+```
+
+### Force full cycle
+
+```
+POST /api/run-full-cycle
+```
+
+Runs: rate differentials → currency strengths (all 8) → persists to DB. Takes ~30–60 seconds depending on external API latency.
+
+---
+
+## Upgrading from v2
+
+1. Deploy new code.
+2. `init_db()` handles the migration automatically on startup — the existing `predictions` table keeps all historical rows. Three new nullable columns (`currency`, `pair_signals`, `model_version`) are added to existing rows as NULL.
+3. Old predictions in the ledger continue to count in accuracy stats; they just won't have `currency`/`pair_signals` populated.
+4. No manual SQL required.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `FRED_API_KEY not set` in logs | `.env` not loaded | Check `.env` exists in project root, not in `frontend/` |
+| Order levels all null | `TWELVE_DATA_API_KEY` missing or invalid | Set key in `.env`, restart |
+| FinBERT never loads | Disk full or no internet on first run | Free disk space; ensure outbound HTTPS on server |
+| COT data empty | `cot_reports` couldn't download CFTC file | Check server has outbound HTTPS; CFTC publishes Fridays |
+| `No module named 'river'` | venv not activated or pip install failed | Re-run `pip install -r requirements.txt` in venv |
+| Sentiment all neutral | FinBERT not loaded (check logs for load error) | See FinBERT note above; check disk/RAM |
+| Calendar shows only USD | Old `calendar_cache.json` from v2 still cached | Delete `calendar_cache.json`, force refresh via `/api/events?force_refresh=true` |
+
+---
+
+## Production Checklist
+
+- [ ] `.env` populated with all 3 keys (FRED, Telegram, Twelve Data)
+- [ ] `pip install -r requirements.txt` completed in venv
+- [ ] `cd frontend && npm run build` completed
+- [ ] `passenger_wsgi.py` points to venv Python
+- [ ] cPanel app restarted after deploy
+- [ ] `GET /api/health` returns all three `_configured: true`
+- [ ] `POST /api/run-full-cycle` returns `status: ok`
+- [ ] Calendar tab shows events for multiple currencies
+- [ ] Strength tab shows 8 currency gauges (may be all 0 until first cycle)
+- [ ] Telegram test message received via `POST /api/telegram/test`
