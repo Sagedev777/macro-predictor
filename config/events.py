@@ -33,9 +33,20 @@ CURRENCIES = ["USD", "EUR", "GBP", "JPY", "AUD", "CHF", "CAD", "NZD"]
 # Canonical pairs the dashboard shows per-event.
 # Derived dynamically in api.py but listed here as the display priority order.
 CANONICAL_PAIRS = [
-    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD",
-    "USDCAD", "NZDUSD", "EURGBP", "EURJPY", "GBPJPY",
-    "AUDJPY", "CADJPY", "XAUUSD",
+    # USD majors
+    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD", "XAUUSD",
+    # EUR crosses
+    "EURGBP", "EURJPY", "EURCHF", "EURAUD", "EURCAD", "EURNZD",
+    # GBP crosses
+    "GBPJPY", "GBPCHF", "GBPAUD", "GBPCAD", "GBPNZD",
+    # JPY crosses
+    "AUDJPY", "CADJPY", "CHFJPY", "NZDJPY",
+    # AUD crosses
+    "AUDCAD", "AUDCHF", "AUDNZD",
+    # CAD crosses
+    "CADCHF", "NZDCAD",
+    # CHF/NZD
+    "NZDCHF",
 ]
 
 # XAUUSD: Gold is priced inversely to USD real yields.
@@ -146,8 +157,8 @@ EVENTS = {
             "INLINE": "Employment signals are mixed. Wait for the actual release print before establishing directional bias.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL GBPUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY GBPUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -175,8 +186,8 @@ EVENTS = {
             "INLINE": "Inflation signals are balanced. Market likely to react strictly to the decimal surprise against consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD", "SELL GBPUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD", "BUY GBPUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / RANGE BOUND"],
         },
         "indicators": [
@@ -204,8 +215,8 @@ EVENTS = {
             "INLINE": "Core metrics are aligned with market consensus. Monitor headline CPI flow.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -233,8 +244,8 @@ EVENTS = {
             "INLINE": "Producer costs are stable. Little directional momentum expected.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL EURUSD", "BUY USDJPY", "SELL XAUUSD"],
-            "BEARISH": ["BUY EURUSD", "SELL USDJPY", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / WATCH CPI FLOW"],
         },
         "indicators": [
@@ -262,8 +273,8 @@ EVENTS = {
             "INLINE": "Claims are tracking consensus. No immediate directional bias.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD", "SELL GBPUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD", "BUY GBPUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -290,8 +301,8 @@ EVENTS = {
             "INLINE": "Jobless rate expected to match forecast. Headline NFP will dominate price action.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL GBPUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY GBPUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / WATCH NFP HEADLINE"],
         },
         "indicators": [
@@ -319,8 +330,8 @@ EVENTS = {
             "INLINE": "Consumer sentiment is tracking expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "BUY US500", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "SELL US500", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / RANGE BOUND"],
         },
         "indicators": [
@@ -347,8 +358,8 @@ EVENTS = {
             "INLINE": "Rate decision expected to be fully priced. Volatility will center on the press conference.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD", "SELL US500"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD", "BUY US500"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / LISTEN TO PRESS CONFERENCE"],
         },
         "indicators": [
@@ -375,8 +386,8 @@ EVENTS = {
             "INLINE": "Sales growth is tracking consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -403,8 +414,8 @@ EVENTS = {
             "INLINE": "Manufacturing activity is matching forecast.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "BUY US30"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "SELL US30"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / RANGE BOUND"],
         },
         "indicators": [
@@ -431,8 +442,8 @@ EVENTS = {
             "INLINE": "GDP growth is tracking consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "BUY US500", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "SELL US500", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO DIRECTIONAL BIAS"],
         },
         "indicators": [
@@ -460,8 +471,8 @@ EVENTS = {
             "INLINE": "Core producer costs remain in line with consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -488,8 +499,8 @@ EVENTS = {
             "INLINE": "Core sales track market expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -515,8 +526,8 @@ EVENTS = {
             "INLINE": "Services activity aligns with expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "BUY US500"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "SELL US500"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -542,8 +553,8 @@ EVENTS = {
             "INLINE": "Wage growth tracks consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / WATCH HEADLINE NFP"],
         },
         "indicators": [
@@ -569,8 +580,8 @@ EVENTS = {
             "INLINE": "ADP private payrolls match expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / WATCH OFFICIAL NFP"],
         },
         "indicators": [
@@ -596,8 +607,8 @@ EVENTS = {
             "INLINE": "Job openings track expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -623,8 +634,8 @@ EVENTS = {
             "INLINE": "Core PCE matches market consensus exactly.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD", "SELL GBPUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD", "BUY GBPUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -651,8 +662,8 @@ EVENTS = {
             "INLINE": "PCE headline tracks expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -681,8 +692,8 @@ EVENTS = {
             "INLINE": "Permits track consensus; limited directional impact.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -708,8 +719,8 @@ EVENTS = {
             "INLINE": "Housing starts match expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -735,8 +746,8 @@ EVENTS = {
             "INLINE": "Orders track consensus; watch ex-transportation for core signal.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -762,8 +773,8 @@ EVENTS = {
             "INLINE": "Trade balance meets consensus; limited market impact expected.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL EURUSD", "BUY USDJPY"],
-            "BEARISH": ["BUY EURUSD", "SELL USDJPY"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -789,8 +800,8 @@ EVENTS = {
             "INLINE": "Industrial output tracks consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -816,8 +827,8 @@ EVENTS = {
             "INLINE": "Empire State index meets expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -843,8 +854,8 @@ EVENTS = {
             "INLINE": "Philly Fed meets expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -870,8 +881,8 @@ EVENTS = {
             "INLINE": "Deflator meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDJPY", "SELL EURUSD", "SELL XAUUSD"],
-            "BEARISH": ["SELL USDJPY", "BUY EURUSD", "BUY XAUUSD"],
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -903,8 +914,8 @@ EVENTS = {
             "INLINE": "HICP meets consensus; limited EUR move.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY"],
-            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY"],
+            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY", "BUY EURCHF", "BUY EURAUD", "BUY EURCAD", "BUY EURNZD"],
+            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY", "SELL EURCHF", "SELL EURAUD", "SELL EURCAD", "SELL EURNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -931,8 +942,8 @@ EVENTS = {
             "INLINE": "Core HICP in line; ECB likely on hold.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY EURUSD", "BUY EURGBP"],
-            "BEARISH": ["SELL EURUSD", "SELL EURGBP"],
+            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY", "BUY EURCHF", "BUY EURAUD", "BUY EURCAD", "BUY EURNZD"],
+            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY", "SELL EURCHF", "SELL EURAUD", "SELL EURCAD", "SELL EURNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -958,8 +969,8 @@ EVENTS = {
             "INLINE": "GDP meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY EURUSD", "BUY EURJPY", "BUY EURGBP"],
-            "BEARISH": ["SELL EURUSD", "SELL EURJPY", "SELL EURGBP"],
+            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY", "BUY EURCHF", "BUY EURAUD", "BUY EURCAD", "BUY EURNZD"],
+            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY", "SELL EURCHF", "SELL EURAUD", "SELL EURCAD", "SELL EURNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -986,8 +997,8 @@ EVENTS = {
             "INLINE": "Decision in line with market pricing.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY"],
-            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY"],
+            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY", "BUY EURCHF", "BUY EURAUD", "BUY EURCAD", "BUY EURNZD"],
+            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY", "SELL EURCHF", "SELL EURAUD", "SELL EURCAD", "SELL EURNZD"],
             "INLINE": ["WAIT / LISTEN TO LAGARDE"],
         },
         "indicators": [
@@ -1014,8 +1025,8 @@ EVENTS = {
             "INLINE": "PMI meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY EURUSD", "BUY EURJPY"],
-            "BEARISH": ["SELL EURUSD", "SELL EURJPY"],
+            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY", "BUY EURCHF", "BUY EURAUD", "BUY EURCAD", "BUY EURNZD"],
+            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY", "SELL EURCHF", "SELL EURAUD", "SELL EURCAD", "SELL EURNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1041,8 +1052,8 @@ EVENTS = {
             "INLINE": "Services PMI meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY EURUSD", "BUY EURGBP"],
-            "BEARISH": ["SELL EURUSD", "SELL EURGBP"],
+            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY", "BUY EURCHF", "BUY EURAUD", "BUY EURCAD", "BUY EURNZD"],
+            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY", "SELL EURCHF", "SELL EURAUD", "SELL EURCAD", "SELL EURNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1068,8 +1079,8 @@ EVENTS = {
             "INLINE": "Unemployment in line.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY EURUSD"],
-            "BEARISH": ["SELL EURUSD"],
+            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY", "BUY EURCHF", "BUY EURAUD", "BUY EURCAD", "BUY EURNZD"],
+            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY", "SELL EURCHF", "SELL EURAUD", "SELL EURCAD", "SELL EURNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1095,8 +1106,8 @@ EVENTS = {
             "INLINE": "Ifo meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY EURUSD", "BUY EURGBP"],
-            "BEARISH": ["SELL EURUSD", "SELL EURGBP"],
+            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY", "BUY EURCHF", "BUY EURAUD", "BUY EURCAD", "BUY EURNZD"],
+            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY", "SELL EURCHF", "SELL EURAUD", "SELL EURCAD", "SELL EURNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1122,8 +1133,8 @@ EVENTS = {
             "INLINE": "ZEW meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY EURUSD"],
-            "BEARISH": ["SELL EURUSD"],
+            "BULLISH": ["BUY EURUSD", "BUY EURGBP", "BUY EURJPY", "BUY EURCHF", "BUY EURAUD", "BUY EURCAD", "BUY EURNZD"],
+            "BEARISH": ["SELL EURUSD", "SELL EURGBP", "SELL EURJPY", "SELL EURCHF", "SELL EURAUD", "SELL EURCAD", "SELL EURNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1154,8 +1165,8 @@ EVENTS = {
             "INLINE": "UK CPI matches consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "SELL EURGBP"],
-            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "BUY EURGBP"],
+            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "BUY GBPCHF", "BUY GBPAUD", "BUY GBPCAD", "BUY GBPNZD", "SELL EURGBP"],
+            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "SELL GBPCHF", "SELL GBPAUD", "SELL GBPCAD", "SELL GBPNZD", "BUY EURGBP"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1182,8 +1193,8 @@ EVENTS = {
             "INLINE": "UK core CPI meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY GBPUSD", "SELL EURGBP"],
-            "BEARISH": ["SELL GBPUSD", "BUY EURGBP"],
+            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "BUY GBPCHF", "BUY GBPAUD", "BUY GBPCAD", "BUY GBPNZD", "SELL EURGBP"],
+            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "SELL GBPCHF", "SELL GBPAUD", "SELL GBPCAD", "SELL GBPNZD", "BUY EURGBP"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1209,8 +1220,8 @@ EVENTS = {
             "INLINE": "GDP meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "SELL EURGBP"],
-            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "BUY EURGBP"],
+            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "BUY GBPCHF", "BUY GBPAUD", "BUY GBPCAD", "BUY GBPNZD", "SELL EURGBP"],
+            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "SELL GBPCHF", "SELL GBPAUD", "SELL GBPCAD", "SELL GBPNZD", "BUY EURGBP"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1237,8 +1248,8 @@ EVENTS = {
             "INLINE": "Decision in line with market expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "SELL EURGBP"],
-            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "BUY EURGBP"],
+            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "BUY GBPCHF", "BUY GBPAUD", "BUY GBPCAD", "BUY GBPNZD", "SELL EURGBP"],
+            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "SELL GBPCHF", "SELL GBPAUD", "SELL GBPCAD", "SELL GBPNZD", "BUY EURGBP"],
             "INLINE": ["WAIT / LISTEN TO BAILEY"],
         },
         "indicators": [
@@ -1265,8 +1276,8 @@ EVENTS = {
             "INLINE": "UK labor data meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY"],
-            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY"],
+            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "BUY GBPCHF", "BUY GBPAUD", "BUY GBPCAD", "BUY GBPNZD", "SELL EURGBP"],
+            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "SELL GBPCHF", "SELL GBPAUD", "SELL GBPCAD", "SELL GBPNZD", "BUY EURGBP"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1292,8 +1303,8 @@ EVENTS = {
             "INLINE": "UK PMI meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY GBPUSD"],
-            "BEARISH": ["SELL GBPUSD"],
+            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "BUY GBPCHF", "BUY GBPAUD", "BUY GBPCAD", "BUY GBPNZD", "SELL EURGBP"],
+            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "SELL GBPCHF", "SELL GBPAUD", "SELL GBPCAD", "SELL GBPNZD", "BUY EURGBP"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1319,8 +1330,8 @@ EVENTS = {
             "INLINE": "UK retail sales meet consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY GBPUSD", "SELL EURGBP"],
-            "BEARISH": ["SELL GBPUSD", "BUY EURGBP"],
+            "BULLISH": ["BUY GBPUSD", "BUY GBPJPY", "BUY GBPCHF", "BUY GBPAUD", "BUY GBPCAD", "BUY GBPNZD", "SELL EURGBP"],
+            "BEARISH": ["SELL GBPUSD", "SELL GBPJPY", "SELL GBPCHF", "SELL GBPAUD", "SELL GBPCAD", "SELL GBPNZD", "BUY EURGBP"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1351,8 +1362,8 @@ EVENTS = {
             "INLINE": "Japan CPI meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDJPY", "SELL EURJPY", "SELL GBPJPY"],
-            "BEARISH": ["BUY USDJPY", "BUY EURJPY", "BUY GBPJPY"],
+            "BULLISH": ["SELL USDJPY", "SELL EURJPY", "SELL GBPJPY", "SELL AUDJPY", "SELL CADJPY", "SELL CHFJPY", "SELL NZDJPY"],
+            "BEARISH": ["BUY USDJPY", "BUY EURJPY", "BUY GBPJPY", "BUY AUDJPY", "BUY CADJPY", "BUY CHFJPY", "BUY NZDJPY"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1378,8 +1389,8 @@ EVENTS = {
             "INLINE": "BoJ decision priced in; watch Ueda press conference for forward guidance.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDJPY", "SELL EURJPY", "SELL GBPJPY", "SELL AUDJPY"],
-            "BEARISH": ["BUY USDJPY", "BUY EURJPY", "BUY GBPJPY", "BUY AUDJPY"],
+            "BULLISH": ["SELL USDJPY", "SELL EURJPY", "SELL GBPJPY", "SELL AUDJPY", "SELL CADJPY", "SELL CHFJPY", "SELL NZDJPY"],
+            "BEARISH": ["BUY USDJPY", "BUY EURJPY", "BUY GBPJPY", "BUY AUDJPY", "BUY CADJPY", "BUY CHFJPY", "BUY NZDJPY"],
             "INLINE": ["WAIT / WATCH BOJ STATEMENT"],
         },
         "indicators": [
@@ -1405,8 +1416,8 @@ EVENTS = {
             "INLINE": "Japan GDP meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDJPY", "SELL EURJPY"],
-            "BEARISH": ["BUY USDJPY", "BUY EURJPY"],
+            "BULLISH": ["SELL USDJPY", "SELL EURJPY", "SELL GBPJPY", "SELL AUDJPY", "SELL CADJPY", "SELL CHFJPY", "SELL NZDJPY"],
+            "BEARISH": ["BUY USDJPY", "BUY EURJPY", "BUY GBPJPY", "BUY AUDJPY", "BUY CADJPY", "BUY CHFJPY", "BUY NZDJPY"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1432,8 +1443,8 @@ EVENTS = {
             "INLINE": "Tankan meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDJPY", "SELL EURJPY"],
-            "BEARISH": ["BUY USDJPY", "BUY EURJPY"],
+            "BULLISH": ["SELL USDJPY", "SELL EURJPY", "SELL GBPJPY", "SELL AUDJPY", "SELL CADJPY", "SELL CHFJPY", "SELL NZDJPY"],
+            "BEARISH": ["BUY USDJPY", "BUY EURJPY", "BUY GBPJPY", "BUY AUDJPY", "BUY CADJPY", "BUY CHFJPY", "BUY NZDJPY"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1464,8 +1475,8 @@ EVENTS = {
             "INLINE": "Australia CPI meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY AUDUSD", "BUY AUDJPY", "BUY AUDCAD"],
-            "BEARISH": ["SELL AUDUSD", "SELL AUDJPY", "SELL AUDCAD"],
+            "BULLISH": ["BUY AUDUSD", "BUY AUDJPY", "BUY AUDCAD", "BUY AUDCHF", "BUY AUDNZD", "SELL EURAUD", "SELL GBPAUD"],
+            "BEARISH": ["SELL AUDUSD", "SELL AUDJPY", "SELL AUDCAD", "SELL AUDCHF", "SELL AUDNZD", "BUY EURAUD", "BUY GBPAUD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1491,8 +1502,8 @@ EVENTS = {
             "INLINE": "Decision in line with market expectations.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY AUDUSD", "BUY AUDJPY"],
-            "BEARISH": ["SELL AUDUSD", "SELL AUDJPY"],
+            "BULLISH": ["BUY AUDUSD", "BUY AUDJPY", "BUY AUDCAD", "BUY AUDCHF", "BUY AUDNZD", "SELL EURAUD", "SELL GBPAUD"],
+            "BEARISH": ["SELL AUDUSD", "SELL AUDJPY", "SELL AUDCAD", "SELL AUDCHF", "SELL AUDNZD", "BUY EURAUD", "BUY GBPAUD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1518,8 +1529,8 @@ EVENTS = {
             "INLINE": "Employment data meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY AUDUSD", "BUY AUDJPY"],
-            "BEARISH": ["SELL AUDUSD", "SELL AUDJPY"],
+            "BULLISH": ["BUY AUDUSD", "BUY AUDJPY", "BUY AUDCAD", "BUY AUDCHF", "BUY AUDNZD", "SELL EURAUD", "SELL GBPAUD"],
+            "BEARISH": ["SELL AUDUSD", "SELL AUDJPY", "SELL AUDCAD", "SELL AUDCHF", "SELL AUDNZD", "BUY EURAUD", "BUY GBPAUD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1545,8 +1556,8 @@ EVENTS = {
             "INLINE": "Retail sales meet consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY AUDUSD"],
-            "BEARISH": ["SELL AUDUSD"],
+            "BULLISH": ["BUY AUDUSD", "BUY AUDJPY", "BUY AUDCAD", "BUY AUDCHF", "BUY AUDNZD", "SELL EURAUD", "SELL GBPAUD"],
+            "BEARISH": ["SELL AUDUSD", "SELL AUDJPY", "SELL AUDCAD", "SELL AUDCHF", "SELL AUDNZD", "BUY EURAUD", "BUY GBPAUD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1576,8 +1587,8 @@ EVENTS = {
             "INLINE": "Canada CPI meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDCAD", "BUY CADJPY"],
-            "BEARISH": ["BUY USDCAD", "SELL CADJPY"],
+            "BULLISH": ["SELL USDCAD", "SELL EURCAD", "SELL GBPCAD", "SELL AUDCAD", "SELL NZDCAD", "BUY CADJPY", "BUY CADCHF"],
+            "BEARISH": ["BUY USDCAD", "BUY EURCAD", "BUY GBPCAD", "BUY AUDCAD", "BUY NZDCAD", "SELL CADJPY", "SELL CADCHF"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1603,8 +1614,8 @@ EVENTS = {
             "INLINE": "BoC decision fully priced.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDCAD", "BUY CADJPY"],
-            "BEARISH": ["BUY USDCAD", "SELL CADJPY"],
+            "BULLISH": ["SELL USDCAD", "SELL EURCAD", "SELL GBPCAD", "SELL AUDCAD", "SELL NZDCAD", "BUY CADJPY", "BUY CADCHF"],
+            "BEARISH": ["BUY USDCAD", "BUY EURCAD", "BUY GBPCAD", "BUY AUDCAD", "BUY NZDCAD", "SELL CADJPY", "SELL CADCHF"],
             "INLINE": ["WAIT / WATCH MACKLEM"],
         },
         "indicators": [
@@ -1630,8 +1641,8 @@ EVENTS = {
             "INLINE": "Labor data meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDCAD", "BUY CADJPY"],
-            "BEARISH": ["BUY USDCAD", "SELL CADJPY"],
+            "BULLISH": ["SELL USDCAD", "SELL EURCAD", "SELL GBPCAD", "SELL AUDCAD", "SELL NZDCAD", "BUY CADJPY", "BUY CADCHF"],
+            "BEARISH": ["BUY USDCAD", "BUY EURCAD", "BUY GBPCAD", "BUY AUDCAD", "BUY NZDCAD", "SELL CADJPY", "SELL CADCHF"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1657,8 +1668,8 @@ EVENTS = {
             "INLINE": "GDP meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDCAD"],
-            "BEARISH": ["BUY USDCAD"],
+            "BULLISH": ["SELL USDCAD", "SELL EURCAD", "SELL GBPCAD", "SELL AUDCAD", "SELL NZDCAD", "BUY CADJPY", "BUY CADCHF"],
+            "BEARISH": ["BUY USDCAD", "BUY EURCAD", "BUY GBPCAD", "BUY AUDCAD", "BUY NZDCAD", "SELL CADJPY", "SELL CADCHF"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1688,8 +1699,8 @@ EVENTS = {
             "INLINE": "NZ CPI meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY NZDUSD", "BUY NZDJPY"],
-            "BEARISH": ["SELL NZDUSD", "SELL NZDJPY"],
+            "BULLISH": ["BUY NZDUSD", "BUY NZDJPY", "BUY NZDCAD", "BUY NZDCHF", "SELL EURNZD", "SELL GBPNZD", "SELL AUDNZD"],
+            "BEARISH": ["SELL NZDUSD", "SELL NZDJPY", "SELL NZDCAD", "SELL NZDCHF", "BUY EURNZD", "BUY GBPNZD", "BUY AUDNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1715,8 +1726,8 @@ EVENTS = {
             "INLINE": "RBNZ decision priced in.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY NZDUSD", "BUY NZDJPY"],
-            "BEARISH": ["SELL NZDUSD", "SELL NZDJPY"],
+            "BULLISH": ["BUY NZDUSD", "BUY NZDJPY", "BUY NZDCAD", "BUY NZDCHF", "SELL EURNZD", "SELL GBPNZD", "SELL AUDNZD"],
+            "BEARISH": ["SELL NZDUSD", "SELL NZDJPY", "SELL NZDCAD", "SELL NZDCHF", "BUY EURNZD", "BUY GBPNZD", "BUY AUDNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1741,8 +1752,8 @@ EVENTS = {
             "INLINE": "NZ labor data meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY NZDUSD"],
-            "BEARISH": ["SELL NZDUSD"],
+            "BULLISH": ["BUY NZDUSD", "BUY NZDJPY", "BUY NZDCAD", "BUY NZDCHF", "SELL EURNZD", "SELL GBPNZD", "SELL AUDNZD"],
+            "BEARISH": ["SELL NZDUSD", "SELL NZDJPY", "SELL NZDCAD", "SELL NZDCHF", "BUY EURNZD", "BUY GBPNZD", "BUY AUDNZD"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1771,8 +1782,8 @@ EVENTS = {
             "INLINE": "Swiss CPI meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["BUY USDCHF" if False else "SELL USDCHF", "BUY CHFJPY"],
-            "BEARISH": ["BUY USDCHF", "SELL CHFJPY"],
+            "BULLISH": ["SELL USDCHF", "SELL EURCHF", "SELL GBPCHF", "SELL AUDCHF", "SELL CADCHF", "SELL NZDCHF", "BUY CHFJPY"],
+            "BEARISH": ["BUY USDCHF", "BUY EURCHF", "BUY GBPCHF", "BUY AUDCHF", "BUY CADCHF", "BUY NZDCHF", "SELL CHFJPY"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1797,8 +1808,8 @@ EVENTS = {
             "INLINE": "Decision fully priced by FX market.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDCHF", "SELL EURCHF", "BUY CHFJPY"],
-            "BEARISH": ["BUY USDCHF", "BUY EURCHF", "SELL CHFJPY"],
+            "BULLISH": ["SELL USDCHF", "SELL EURCHF", "SELL GBPCHF", "SELL AUDCHF", "SELL CADCHF", "SELL NZDCHF", "BUY CHFJPY"],
+            "BEARISH": ["BUY USDCHF", "BUY EURCHF", "BUY GBPCHF", "BUY AUDCHF", "BUY CADCHF", "BUY NZDCHF", "SELL CHFJPY"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [
@@ -1824,8 +1835,8 @@ EVENTS = {
             "INLINE": "Swiss unemployment meets consensus.",
         },
         "trade_signals": {
-            "BULLISH": ["SELL USDCHF"],
-            "BEARISH": ["BUY USDCHF"],
+            "BULLISH": ["SELL USDCHF", "SELL EURCHF", "SELL GBPCHF", "SELL AUDCHF", "SELL CADCHF", "SELL NZDCHF", "BUY CHFJPY"],
+            "BEARISH": ["BUY USDCHF", "BUY EURCHF", "BUY GBPCHF", "BUY AUDCHF", "BUY CADCHF", "BUY NZDCHF", "SELL CHFJPY"],
             "INLINE": ["WAIT / NO BIAS"],
         },
         "indicators": [

@@ -173,8 +173,14 @@ def check_and_alert_upcoming():
     """
     from learning import (
         build_features, learn_one, lean_to_outcome,
-        predict_strength,
+        predict_strength, _registry,
     )
+
+    def _registry_n_trained(ccy: str) -> int:
+        try:
+            return _registry.get_n_trained(ccy)
+        except Exception:
+            return 0
     from data_sources import get_rate_differential, rate_diff_to_score
     from sentiment import get_latest_cot, get_latest_sentiment, cot_to_score, sentiment_to_score
     from indicators import persist_currency_strength
@@ -270,6 +276,15 @@ def check_and_alert_upcoming():
                             ))
                             db.commit()
 
+                        # Inject trade_signals from events config into pred_result for Telegram
+                        _raw_dir = pred_result.get("lean_direction", "")
+                        _dir_key = (
+                            "BULLISH" if _raw_dir.upper() in ("BEAT", "BULLISH") else
+                            "BEARISH" if _raw_dir.upper() in ("MISS", "BEARISH") else
+                            "INLINE"
+                        )
+                        pred_result["trade_signals"] = event_cfg.get("trade_signals", {}).get(_dir_key, [])
+
                         send_telegram_alert(
                             pred_result,
                             release_time=f"{event_utc.strftime('%H:%M')} UTC (in {int(hours_until * 60)}m)",
@@ -298,7 +313,7 @@ def check_and_alert_upcoming():
                     .first()
                 )
 
-                if recent_pred and is_pre_release_prediction(recent_pred):
+                if recent_pred:
                     surprise = round(actual - forecast, 4)
                     lean     = recent_pred.lean_direction
                     was_correct, verdict_msg = grade_prediction(code, lean, actual, forecast)
@@ -310,12 +325,15 @@ def check_and_alert_upcoming():
                     recent_pred.actual_surprise = surprise
                     db.commit()
 
-                    # ── River learn_one() ─────────────────────────────────────
+                    # ── River learn_one() — fires on ALL graded predictions ────
+                    # is_pre_release_prediction only gates accuracy DISPLAY,
+                    # not training — every real outcome is valid training data.
                     try:
                         rd   = get_rate_differential(currency)
                         cot  = get_latest_cot(currency)
                         sent = get_latest_sentiment(currency)
 
+                        n_before = _registry_n_trained(currency)
                         features = build_features(
                             indicator_score = float(recent_pred.composite_score or 0.0),
                             rate_diff_score = rate_diff_to_score(rd),
@@ -324,10 +342,18 @@ def check_and_alert_upcoming():
                         )
                         outcome = lean_to_outcome(lean, was_correct)
                         stats   = learn_one(currency, features, outcome)
+                        n_after = stats.get("n_trained", 0)
+
                         log.info(
-                            "River learn_one %s: n=%d acc=%.1f%%",
-                            currency,
-                            stats.get("n_trained", 0),
+                            "learn_one [%s] event=%s outcome=%d correct=%s "
+                            "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
+                            "n_trained: %d → %d  acc=%.1f%%",
+                            currency, code, outcome, was_correct,
+                            features.get("indicator_score", 0),
+                            features.get("rate_diff_score", 0),
+                            features.get("cot_score", 0),
+                            features.get("sentiment_score", 0),
+                            n_before, n_after,
                             (stats.get("live_accuracy") or 0) * 100,
                         )
 
@@ -465,19 +491,31 @@ def refresh_currency_strengths():
             features      = build_features(ind_score, rd_score, c_score, s_score)
             pred_strength = predict_strength(ccy, features)
 
+            # Use direct composite until River has enough real training data
+            from database import load_river_model as _lrm
+            _, n_trained, _, _ = _lrm(ccy)
+            if (n_trained or 0) < 20:
+                weights = [0.50, 0.25, 0.15, 0.10]
+                scores  = [ind_score, rd_score, c_score, s_score]
+                composite = sum(w * s for w, s in zip(weights, scores))
+                strength_score = round(max(-1.0, min(1.0, composite)), 4)
+                confidence_pct = 40.0 + abs(strength_score) * 25.0
+            else:
+                strength_score = pred_strength.strength_score
+                confidence_pct = pred_strength.confidence_pct
+
             persist_currency_strength(
                 currency        = ccy,
-                strength_score  = pred_strength.strength_score,
+                strength_score  = strength_score,
                 indicator_score = ind_score,
                 rate_diff_score = rd_score,
                 cot_score       = c_score,
                 sentiment_score = s_score,
-                confidence_pct  = pred_strength.confidence_pct,
+                confidence_pct  = confidence_pct,
             )
             log.info(
-                "Currency strength %s: score=%.3f conf=%.1f%% (ind=%.3f rd=%.3f cot=%.3f sent=%.3f)",
-                ccy, pred_strength.strength_score, pred_strength.confidence_pct,
-                ind_score, rd_score, c_score, s_score,
+                "Currency strength %s: score=%.3f conf=%.1f%%",
+                ccy, strength_score, confidence_pct,
             )
 
     except Exception as e:

@@ -4,12 +4,11 @@ alerts.py — Telegram alert sender.
 Sends a pre-formatted message to your Telegram chat with:
   - Event name + release time
   - BEAT/MISS/INLINE lean with confidence %
-  - Trade signals
+  - Affected majors (from trade_signals in events.py)
   - Per-indicator breakdown table
 """
 
 import os
-import re
 import logging
 import requests
 from dotenv import load_dotenv
@@ -21,25 +20,15 @@ log = logging.getLogger("alerts")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
-DIRECTION_EMOJI = {
-    "BEAT":   "🟢 BEAT",
-    "MISS":   "🔴 MISS",
-    "INLINE": "🟡 INLINE",
-}
-
 SIGNAL_EMOJI = {
-    1:  "✅ BULLISH",
-    -1: "❌ BEARISH",
-    0:  "⚪ NEUTRAL",
+    1:  "✅",
+    -1: "❌",
+    0:  "⚪",
 }
 
 
 def _normalize_direction(direction: str) -> str:
-    """
-    Normalize lean_direction to the key used in EVENTS config.
-    The indicator engine returns 'BEAT'/'MISS'/'INLINE' but EVENTS uses
-    'BULLISH'/'BEARISH'/'INLINE' as keys for trade_signals, event_labels, explanations.
-    """
+    """Normalize lean_direction to BULLISH/BEARISH/INLINE for config lookups."""
     d = (direction or "").upper()
     if d in ("BEAT", "BULLISH"):
         return "BULLISH"
@@ -48,98 +37,95 @@ def _normalize_direction(direction: str) -> str:
     return "INLINE"
 
 
+def _format_pair(signal: str) -> str:
+    """
+    Format a trade signal string for display.
+    'BUY USDJPY' → 'BUY USD/JPY'
+    'SELL XAUUSD' → 'SELL XAU/USD'
+    Leaves WAIT/NO BIAS signals untouched.
+    """
+    parts = signal.strip().split(" ", 1)
+    if len(parts) != 2:
+        return signal
+    direction, sym = parts
+    sym = sym.strip()
+    # Insert slash into 6-char forex pairs; handle XAUUSD as XAU/USD
+    if len(sym) == 6:
+        fmtSym = f"{sym[:3]}/{sym[3:]}"
+    else:
+        fmtSym = sym
+    return f"{direction} {fmtSym}"
+
+
 def _format_prediction_message(prediction: dict, release_time: str = None) -> str:
     """Build the Telegram message from a prediction dict."""
-    event_code   = prediction["event_code"]
-    direction    = prediction["lean_direction"]
-    confidence   = prediction["confidence_pct"]
-    composite    = prediction["composite_score"]
-    indicators   = prediction["indicator_breakdown"]
+    event_code = prediction["event_code"]
+    direction  = prediction["lean_direction"]
+    confidence = prediction["confidence_pct"]
+    indicators = prediction["indicator_breakdown"]
 
-    # Normalize so BEAT→BULLISH, MISS→BEARISH for config lookups
-    dir_key = _normalize_direction(direction)
+    # Normalize BEAT→BULLISH, MISS→BEARISH for config lookups
+    dir_key   = _normalize_direction(direction)
+    event_cfg = EVENTS.get(event_code, {})
+    currency  = event_cfg.get("currency", prediction.get("currency", "USD"))
 
-    event_cfg   = EVENTS.get(event_code, {})
-    event_label = prediction.get("event_label") or event_cfg.get("event_labels", {}).get(dir_key, direction)
-    explanation = prediction.get("explanation") or event_cfg.get("explanations", {}).get(dir_key, "")
+    # Direction label and emoji
+    if dir_key == "BULLISH":
+        dir_emoji = "🟢"
+        dir_label = "BUY"
+    elif dir_key == "BEARISH":
+        dir_emoji = "🔴"
+        dir_label = "SELL"
+    else:
+        dir_emoji = "🟡"
+        dir_label = "HOLD"
 
-    macro_bias = "🟢 USD BULLISH" if dir_key == "BULLISH" else ("🔴 USD BEARISH" if dir_key == "BEARISH" else "🟡 NEUTRAL")
     conf_bar = "█" * int(confidence / 10) + "░" * (10 - int(confidence / 10))
+
+    # Affected majors — sourced exclusively from trade_signals in events.py
+    trade_signals = prediction.get("trade_signals")
+    if not trade_signals:
+        trade_signals = event_cfg.get("trade_signals", {}).get(dir_key, [])
+
+    if isinstance(trade_signals, str):
+        trade_signals = [s.strip() for s in trade_signals.split(",") if s.strip()]
+
+    # Filter out WAIT/NO BIAS entries, format for display
+    major_signals = [
+        s for s in trade_signals
+        if not s.upper().startswith("WAIT")
+    ]
+    majors_line = " • ".join(f"`{_format_pair(s)}`" for s in major_signals) if major_signals else "`—`"
 
     lines = [
         f"📊 *PRE-RELEASE SIGNAL — {event_code}*",
-        f"",
-        f"Macro Bias: *{macro_bias}*",
-        f"Event Lean: *{event_label}*",
+        "",
+        f"{event_code} → {dir_emoji} {dir_label} {currency}",
         f"Confidence: `{confidence:.0f}%` `{conf_bar}`",
-        f"Composite Score: `{composite:+.3f}`",
+        "",
+        "🎯 *Affected majors:*",
+        majors_line,
     ]
 
     if release_time:
-        lines += ["", f"🕐 Release: `{release_time} UTC`"]
+        lines += ["", f"🕐 Release: `{release_time}`"]
 
-    if explanation:
-        clean_exp = explanation.replace("_", " ").replace("*", "")
-        lines += ["", "─────────────────────", f"💡 *Outlook:* _{clean_exp}_"]
-
-    # Standard affected pairs fallback per event
-    default_pairs = {
-        "NFP": ["EURUSD", "USDJPY", "GBPUSD", "XAUUSD"],
-        "CPI": ["EURUSD", "USDJPY", "XAUUSD", "GBPUSD"],
-        "CORE_CPI": ["EURUSD", "USDJPY", "XAUUSD", "GBPUSD"],
-        "PPI": ["EURUSD", "USDJPY", "XAUUSD"],
-        "JOBLESS_CLAIMS": ["EURUSD", "USDJPY", "XAUUSD", "GBPUSD"],
-        "UNEMPLOYMENT_RATE": ["EURUSD", "USDJPY", "GBPUSD", "XAUUSD"],
-        "GDP": ["EURUSD", "USDJPY", "US500", "XAUUSD"],
-        "FOMC": ["EURUSD", "USDJPY", "XAUUSD", "US500", "US30"],
-        "RETAIL_SALES": ["EURUSD", "USDJPY", "US30", "XAUUSD"],
-        "ISM_MFG": ["USDJPY", "EURUSD", "US30"],
-        "CONSUMER_CONFIDENCE": ["EURUSD", "USDJPY", "US500"],
-    }.get(event_code, ["EURUSD", "USDJPY", "GBPUSD", "XAUUSD"])
-
-    # Add trade signals & affected pairs — always look up using normalized direction key
-    trade_signals = prediction.get("trade_signals")
-    if not trade_signals:
-        # Try normalized key first (BULLISH/BEARISH/INLINE)
-        trade_signals = event_cfg.get("trade_signals", {}).get(dir_key, [])
-    if not trade_signals:
-        # Final fallback: try raw direction string
-        trade_signals = event_cfg.get("trade_signals", {}).get(direction, [])
-
-    if isinstance(trade_signals, str):
-        trade_signals = [s.strip() for s in trade_signals.split(",") if s.strip()] or [trade_signals]
-
-    # Extract all asset/currency pairs from the signals
-    extracted_pairs = []
-    if trade_signals:
-        for ts in trade_signals:
-            for word in ts.split():
-                clean_word = re.sub(r"[^A-Za-z0-9]", "", word).upper()
-                if clean_word in ("USDJPY", "EURUSD", "GBPUSD", "XAUUSD", "US500", "US30", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD", "GOLD"):
-                    if clean_word not in extracted_pairs:
-                        extracted_pairs.append(clean_word)
-
-    final_pairs = extracted_pairs if extracted_pairs else default_pairs
-
-    lines += ["", "─────────────────────", "🎯 *Pairs to be Affected:*"]
-    lines.append(" • ".join([f"`{p}`" for p in final_pairs]))
-
-    if trade_signals:
-        lines += ["", "⚡ *Trade Execution Signals:*"]
-        for ts in trade_signals:
-            lines.append(f"• `{ts}`")
-
-    lines += ["", "─────────────────────", "*Leading Indicators:*"]
+    lines += [
+        "",
+        "─────────────────────",
+        "📋 *Indicator Details*",
+    ]
 
     for ind in indicators:
-        sig_str = SIGNAL_EMOJI.get(ind.get("signal", 0), "⚪ NEUTRAL")
-        z = ind.get("z_score")
+        sig  = ind.get("signal", 0)
+        emoji = SIGNAL_EMOJI.get(sig, "⚪")
+        z    = ind.get("z_score")
         z_str = f"z={z:+.2f}" if z is not None else "z=n/a"
-        desc = ind.get("description", ind.get("fred_series", ""))
-        # Truncate and clean description to avoid broken telegram markdown
-        cleaned_desc = desc.replace("_", " ").replace("*", "")
-        short_desc = cleaned_desc[:45] + "…" if len(cleaned_desc) > 45 else cleaned_desc
-        lines.append(f"• {sig_str}  `{z_str}`  _{short_desc}_")
+        desc  = ind.get("description", ind.get("fred_series", ""))
+        cleaned = desc.replace("_", " ").replace("*", "")
+        short   = cleaned[:50] + "…" if len(cleaned) > 50 else cleaned
+        sig_word = "BULLISH" if sig > 0 else ("BEARISH" if sig < 0 else "NEUTRAL")
+        lines.append(f"• {emoji} {sig_word}  `{z_str}`  _{short}_")
 
     lines += [
         "",
