@@ -1,6 +1,7 @@
 import './App.css'
 import axios from 'axios'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React from 'react'
 
 const API = '/api'
 const LS_KEY = 'macro_currency_filter'
@@ -19,7 +20,7 @@ interface CalEvent {
   forecast: number | null
   previous: number | null
   actual: number | null
-  impact: 'HIGH' | 'MEDIUM'
+  impact: 'HIGH' | 'MEDIUM' | 'LOW'
   is_simultaneous: boolean
   prediction?: PredSummary | null
 }
@@ -44,7 +45,6 @@ interface OrderSug {
 }
 
 interface Indicator { description: string; z_score: number | null; signal: number; weight: number }
-
 
 interface ModelStatus {
   currency: string; n_trained: number; n_real: number
@@ -75,11 +75,6 @@ interface AccStats {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-const FLAG: Record<string, string> = {
-  USD: '🇺🇸', EUR: '🇪🇺', GBP: '🇬🇧', JPY: '🇯🇵',
-  AUD: '🇦🇺', CHF: '🇨🇭', CAD: '🇨🇦', NZD: '🇳🇿',
-}
 
 const FW_LABELS: Record<string, string> = {
   indicator_score: 'Indicator',
@@ -115,17 +110,6 @@ function formatDate(isoUtc: string): string {
   } catch { return '' }
 }
 
-function groupDateLabel(isoUtc: string): string {
-  const d = new Date(isoUtc)
-  const today = new Date()
-  const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
-  const eventUTC = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
-  const diff = (eventUTC - todayUTC) / 86400000
-  if (diff === 0) return 'Today'
-  if (diff === 1) return 'Tomorrow'
-  return formatDate(isoUtc)
-}
-
 function directionClass(d: string): 'bull' | 'bear' | 'flat' {
   const u = d?.toUpperCase()
   if (u === 'BEAT' || u === 'BULLISH' || u === 'BUY') return 'bull'
@@ -138,13 +122,6 @@ function directionLabel(d: string): string {
   if (u === 'BEAT' || u === 'BULLISH') return 'BULLISH'
   if (u === 'MISS' || u === 'BEARISH') return 'BEARISH'
   return 'INLINE'
-}
-
-function directionEmoji(d: string, ccy: string): string {
-  const u = d?.toUpperCase()
-  if (u === 'BEAT' || u === 'BULLISH') return `🟢 BUY ${ccy}`
-  if (u === 'MISS' || u === 'BEARISH') return `🔴 SELL ${ccy}`
-  return `🟡 HOLD ${ccy}`
 }
 
 function confBarClass(pct: number): string {
@@ -173,7 +150,6 @@ function buildPairsFromPred(pred: PredSummary): { dir: string; pair: string }[] 
       .map(formatPairSignal)
       .filter(p => p.dir && p.pair)
   }
-  // Fallback: top pair_signals
   return (pred.pair_signals ?? [])
     .slice(0, 7)
     .map(ps => ({ dir: ps.direction.toUpperCase().includes('BUY') || ps.direction.toUpperCase() === 'BULLISH' ? 'BUY' : 'SELL', pair: ps.pair }))
@@ -207,7 +183,7 @@ function CurrencyFilter({ sel, toggle }: { sel: string[]; toggle: (c: string) =>
           onClick={() => toggle(c)}
           aria-pressed={sel.includes(c)}
         >
-          {FLAG[c]} {c}
+          {c}
         </button>
       ))}
     </div>
@@ -240,19 +216,61 @@ function CalConfBar({ pct, cls }: { pct: number; cls?: string }) {
 
 // ── Navigation components ─────────────────────────────────────────────────────
 
-const NAV_ITEMS: { page: Page; icon: string; label: string }[] = [
-  { page: 'home', icon: '🏠', label: 'Home' },
-  { page: 'calendar', icon: '📅', label: 'Calendar' },
-  { page: 'model', icon: '📈', label: 'Model' },
-  { page: 'track', icon: '📋', label: 'Records' },
+const NAV_ITEMS: { page: Page; icon: React.ReactNode; label: string }[] = [
+  {
+    page: 'home',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+        <polyline points="9 22 9 12 15 12 15 22"/>
+      </svg>
+    ),
+    label: 'Home',
+  },
+  {
+    page: 'calendar',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+        <line x1="16" y1="2" x2="16" y2="6"/>
+        <line x1="8" y1="2" x2="8" y2="6"/>
+        <line x1="3" y1="10" x2="21" y2="10"/>
+      </svg>
+    ),
+    label: 'Calendar',
+  },
+  {
+    page: 'model',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <line x1="18" y1="20" x2="18" y2="10"/>
+        <line x1="12" y1="20" x2="12" y2="4"/>
+        <line x1="6" y1="20" x2="6" y2="14"/>
+      </svg>
+    ),
+    label: 'Model',
+  },
+  {
+    page: 'track',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+        <line x1="16" y1="13" x2="8" y2="13"/>
+        <line x1="16" y1="17" x2="8" y2="17"/>
+        <polyline points="10 9 9 9 8 9"/>
+      </svg>
+    ),
+    label: 'Records',
+  },
 ]
 
 function SideNav({ page, setPage }: { page: Page; setPage: (p: Page) => void }) {
   return (
     <nav className="side-rail" aria-label="Main navigation">
       <div className="rail-logo">
-        <span className="rail-dot" />
-        MacroPredictor
+        <img src="/logo.png" alt="Titanfxsage" style={{ width: 28, height: 28, objectFit: 'contain' }} />
+        Titanfxsage
       </div>
       <div className="rail-nav">
         {NAV_ITEMS.map(item => (
@@ -289,6 +307,13 @@ function BottomNav({ page, setPage }: { page: Page; setPage: (p: Page) => void }
   )
 }
 
+// ── ImpactDot ─────────────────────────────────────────────────────────────────
+
+function ImpactDot({ impact }: { impact: string }) {
+  const cls = impact === 'HIGH' ? 'high' : impact === 'MEDIUM' ? 'medium' : 'low'
+  return <span className={`impact-dot impact-dot-${cls}`} aria-label={impact} />
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // HOME PAGE
 // ══════════════════════════════════════════════════════════════════════════════
@@ -312,7 +337,6 @@ function HomePage({ ccySel, now }: { ccySel: string[]; now: number }) {
       warmupFired.current = true
       axios.post(`${API}/predictions/warmup`).catch(() => { /* fire and forget */ })
       axios.post(`${API}/run-full-cycle`).catch(() => { /* fire and forget */ })
-      // Re-fetch events after warmup delay to pick up predictions
       const timer = setTimeout(() => {
         axios.get(`${API}/events`)
           .then(r => setEvents(r.data.events ?? []))
@@ -322,27 +346,39 @@ function HomePage({ ccySel, now }: { ccySel: string[]; now: number }) {
     }
   }, [events.length])
 
+  // Auto-refresh events every 60 seconds
+  useEffect(() => {
+    const id = setInterval(() => {
+      axios.get(`${API}/events`)
+        .then(r => setEvents(r.data.events ?? []))
+        .catch(() => {})
+    }, 60000)
+    return () => clearInterval(id)
+  }, [])
+
   // Find next upcoming event matching selected currencies
   const nextEvent = useMemo(() => {
     if (events.length === 0) return null
     const nowMs = now
-    const upcoming = events
-      .filter(e => e.release_time_utc && e.actual === null)
-      .filter(e => ccySel.includes(e.currency))
-      .sort((a, b) => new Date(a.release_time_utc).getTime() - new Date(b.release_time_utc).getTime())
 
+    const filtered = events
+      .filter(e => e.release_time_utc && ccySel.includes(e.currency))
+
+    if (filtered.length === 0) return null
+
+    const upcoming = filtered
+      .filter(e => new Date(e.release_time_utc).getTime() > nowMs && e.actual === null)
+      .sort((a, b) => new Date(a.release_time_utc).getTime() - new Date(b.release_time_utc).getTime())
     if (upcoming.length > 0) return upcoming[0]
 
-    // Fallback: nearest past within 1h
-    const recent = events
-      .filter(e => ccySel.includes(e.currency))
-      .filter(e => {
-        const ms = new Date(e.release_time_utc).getTime()
-        return nowMs - ms < 3600000 && nowMs - ms >= 0
-      })
-      .sort((a, b) => new Date(b.release_time_utc).getTime() - new Date(a.release_time_utc).getTime())
+    const anyFuture = filtered
+      .filter(e => new Date(e.release_time_utc).getTime() > nowMs)
+      .sort((a, b) => new Date(a.release_time_utc).getTime() - new Date(b.release_time_utc).getTime())
+    if (anyFuture.length > 0) return anyFuture[0]
 
-    return recent[0] ?? null
+    const past = filtered
+      .sort((a, b) => new Date(b.release_time_utc).getTime() - new Date(a.release_time_utc).getTime())
+    return past[0] ?? null
   }, [events, ccySel, now])
 
   if (loading) {
@@ -357,9 +393,9 @@ function HomePage({ ccySel, now }: { ccySel: string[]; now: number }) {
     return (
       <div className="page">
         <div className="home-no-event">
-          <span style={{ fontSize: 32 }}>📭</span>
-          <span>No events in the next 24h</span>
-          <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>Check back later or broaden your currency filter</span>
+          <span style={{ fontSize: 32, color: 'var(--text-dim)' }}>—</span>
+          <span>No events found</span>
+          <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>Try selecting a different currency or wait for the calendar to refresh</span>
         </div>
       </div>
     )
@@ -371,17 +407,22 @@ function HomePage({ ccySel, now }: { ccySel: string[]; now: number }) {
   const eventName = nextEvent.display_name ?? nextEvent.event_name
   const pairs = pred ? buildPairsFromPred(pred) : []
 
-  // Top suggested entry
   const topEntry = pred?.order_suggestions?.find(s => s.suggested_entry != null)
 
   return (
     <div className="page">
       <div className="home-card">
-        {/* Header */}
+        {/* Header — FIX 7: impact badge added, FIX 2: no FLAG emoji */}
         <div className="home-header">
-          <div className="home-event-name">{eventName}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="home-event-name">{eventName}</div>
+            <div style={{ marginTop: 4 }}>
+              <span className={`impact-badge impact-${(nextEvent.impact ?? 'medium').toLowerCase()}`}>
+                {nextEvent.impact ?? 'MEDIUM'}
+              </span>
+            </div>
+          </div>
           <div className="home-ccy-chip">
-            <span>{FLAG[nextEvent.currency] ?? ''}</span>
             <span>{nextEvent.currency}</span>
           </div>
         </div>
@@ -408,18 +449,21 @@ function HomePage({ ccySel, now }: { ccySel: string[]; now: number }) {
           )}
         </div>
 
-        {/* Countdown row */}
+        {/* Countdown row — FIX 1: unchanged, already working */}
         <div className="home-countdown-row">
           <span className="home-countdown-label">Release</span>
           <span className="home-countdown-time">{formatTime(nextEvent.release_time_utc)}</span>
           <span className={`home-countdown-value${released ? ' released' : ''}`}>{countdown}</span>
         </div>
 
-        {/* Direction + Confidence */}
+        {/* Direction + Confidence — FIX 2: no directionEmoji */}
         {pred ? (
           <div className="home-direction">
             <div className={`home-dir-label ${directionClass(pred.lean_direction)}`}>
-              {directionEmoji(pred.lean_direction, nextEvent.currency)}
+              <span className={`badge badge-${directionClass(pred.lean_direction) === 'bull' ? 'buy' : directionClass(pred.lean_direction) === 'bear' ? 'sell' : 'hold'}`}>
+                {directionLabel(pred.lean_direction)}
+              </span>
+              <span style={{ marginLeft: 8, fontSize: 16, color: 'var(--text)' }}>{nextEvent.currency}</span>
             </div>
             {pred.event_label && pred.event_label !== pred.lean_direction && (
               <div className="home-dir-sub">{pred.event_label}</div>
@@ -469,58 +513,63 @@ function HomePage({ ccySel, now }: { ccySel: string[]; now: number }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CALENDAR PAGE
+// CALENDAR PAGE — FIX 5 (Forex Factory layout) + FIX 6 (auto-refresh)
 // ══════════════════════════════════════════════════════════════════════════════
 
-function CalendarEventRow({ ev, now }: { ev: CalEvent; now: number }) {
-  const [open, setOpen] = useState(false)
-  const [showIndicators, setShowIndicators] = useState(false)
+function CalendarEventRow({ ev, isExpanded, onToggle }: {
+  ev: CalEvent; isExpanded: boolean; onToggle: () => void
+}) {
   const pred = ev.prediction
   const released = ev.actual !== null
+  const [showIndicators, setShowIndicators] = useState(false)
 
   const pairs = pred ? buildPairsFromPred(pred) : []
   const indicators = pred?.indicators ?? []
 
+  const timeStr = (() => {
+    try {
+      return new Date(ev.release_time_utc).toLocaleTimeString('en-GB', {
+        hour: '2-digit', minute: '2-digit', timeZone: 'UTC'
+      })
+    } catch { return '' }
+  })()
+
+  const actualColor = (() => {
+    if (ev.actual == null || ev.forecast == null) return 'var(--text)'
+    if (ev.actual > ev.forecast) return 'var(--buy)'
+    if (ev.actual < ev.forecast) return 'var(--sell)'
+    return 'var(--text-dim)'
+  })()
+
   return (
-    <div className="cal-row" onClick={() => setOpen(v => !v)} role="button" aria-expanded={open}>
-      <div className="cal-row-top">
-        <span className={`cal-impact-dot ${ev.impact === 'HIGH' ? 'high' : 'med'}`} aria-hidden="true" />
-        <span style={{ fontSize: 16 }}>{FLAG[ev.currency] ?? ''}</span>
-        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', flexShrink: 0 }}>{ev.currency}</span>
-        <span className="cal-row-name">{ev.display_name ?? ev.event_name}</span>
-        <span className="cal-row-time">{formatTime(ev.release_time_utc)}</span>
-        {released
-          ? <span className="cal-row-released">Released</span>
-          : <span className="cal-row-cd">{formatCountdown(ev.release_time_utc, now)}</span>
-        }
+    <div
+      className="cal2-row"
+      onClick={onToggle}
+      role="button"
+      aria-expanded={isExpanded}
+      tabIndex={0}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onToggle() }}
+    >
+      <div className="cal2-row-main">
+        <span className="cal2-time" style={{ opacity: released ? 0.45 : 1 }}>{timeStr}</span>
+        <span className="ccy-badge" style={{ opacity: released ? 0.45 : 1 }}>{ev.currency}</span>
+        <span className="cal2-name" style={{ opacity: released ? 0.45 : 1 }}>{ev.display_name ?? ev.event_name}</span>
+        <span style={{ opacity: released ? 0.45 : 1 }}><ImpactDot impact={ev.impact} /></span>
+        <span className="cal2-num" style={{ opacity: released ? 0.45 : 1 }}>{ev.forecast != null ? ev.forecast : '—'}</span>
+        <span className="cal2-num" style={{ opacity: released ? 0.45 : 1 }}>{ev.previous != null ? ev.previous : '—'}</span>
+        <span className="cal2-actual" style={{ color: ev.actual != null ? actualColor : 'var(--text-dim)' }}>
+          {ev.actual != null ? ev.actual : '—'}
+        </span>
       </div>
 
-      <div className="cal-row-data" onClick={e => e.stopPropagation()}>
-        {ev.forecast != null && (
-          <div className="cal-data-item">
-            <span className="cal-data-label">Forecast</span>
-            <span className="cal-data-value">{ev.forecast}</span>
-          </div>
-        )}
-        {ev.previous != null && (
-          <div className="cal-data-item">
-            <span className="cal-data-label">Previous</span>
-            <span className="cal-data-value">{ev.previous}</span>
-          </div>
-        )}
-        {ev.actual != null && (
-          <div className="cal-data-item">
-            <span className="cal-data-label">Actual</span>
-            <span className="cal-data-value actual-val">{ev.actual}</span>
-          </div>
-        )}
-      </div>
-
-      {open && pred && (
+      {isExpanded && pred && (
         <div className="cal-detail" onClick={e => e.stopPropagation()}>
           <div className="cal-pred-label">Prediction</div>
           <div className={`cal-dir ${directionClass(pred.lean_direction)}`}>
-            {directionEmoji(pred.lean_direction, ev.currency)}
+            <span className={`badge badge-${directionClass(pred.lean_direction) === 'bull' ? 'buy' : directionClass(pred.lean_direction) === 'bear' ? 'sell' : 'hold'}`}>
+              {directionLabel(pred.lean_direction)}
+            </span>
+            <span style={{ marginLeft: 8, fontSize: 14, color: 'var(--text)' }}>{ev.currency}</span>
           </div>
           <CalConfBar pct={pred.confidence_pct} />
           <div className="cal-conf-label">{pred.confidence_pct.toFixed(0)}% confidence</div>
@@ -540,7 +589,7 @@ function CalendarEventRow({ ev, now }: { ev: CalEvent; now: number }) {
             <>
               <button
                 className="cal-indicators-toggle"
-                onClick={() => setShowIndicators(v => !v)}
+                onClick={e => { e.stopPropagation(); setShowIndicators(v => !v) }}
                 aria-expanded={showIndicators}
               >
                 {showIndicators ? 'Hide indicators ▲' : 'Show indicators ▼'}
@@ -563,7 +612,7 @@ function CalendarEventRow({ ev, now }: { ev: CalEvent; now: number }) {
         </div>
       )}
 
-      {open && !pred && (
+      {isExpanded && !pred && (
         <div className="cal-detail" onClick={e => e.stopPropagation()}>
           <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>No prediction available</div>
         </div>
@@ -572,16 +621,13 @@ function CalendarEventRow({ ev, now }: { ev: CalEvent; now: number }) {
   )
 }
 
-function CalendarPage({ ccySel, now }: { ccySel: string[]; now: number }) {
+function CalendarPage({ ccySel }: { ccySel: string[] }) {
   const [events, setEvents] = useState<CalEvent[]>([])
   const [loading, setLoading] = useState(true)
-  const [syncing, setSyncing] = useState(false)
-  const [toast, setToast] = useState<string | null>(null)
-
-  const flash = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000) }
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [pastExpanded, setPastExpanded] = useState(false)
 
   const load = useCallback(async () => {
-    setLoading(true)
     try { const r = await axios.get(`${API}/events`); setEvents(r.data.events ?? []) }
     catch { setEvents([]) }
     finally { setLoading(false) }
@@ -589,46 +635,95 @@ function CalendarPage({ ccySel, now }: { ccySel: string[]; now: number }) {
 
   useEffect(() => { load() }, [load])
 
-  const syncActuals = async () => {
-    setSyncing(true)
-    try {
-      const r = await axios.post(`${API}/events/sync-actuals`)
-      flash(`${r.data.newly_graded ?? 0} event(s) graded`)
-      load()
-    } catch { flash('Sync failed') }
-    finally { setSyncing(false) }
-  }
+  // Auto-refresh every 60 seconds
+  useEffect(() => {
+    const id = setInterval(() => { load() }, 60000)
+    return () => clearInterval(id)
+  }, [load])
 
   const filtered = useMemo(
     () => events.filter(e => ccySel.includes(e.currency)),
     [events, ccySel]
   )
 
-  // Group by date label, preserving chronological order of groups
-  const groups = useMemo(() => {
-    const map = new Map<string, { label: string; ts: number; events: CalEvent[] }>()
+  // Group into past days, today, and future days
+  const { pastGroups, todayGroup, futureGroups } = useMemo(() => {
+    const today = new Date()
+    const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
+
+    const byDate = new Map<number, CalEvent[]>()
     for (const ev of filtered) {
-      const label = groupDateLabel(ev.release_time_utc)
-      const ts = new Date(ev.release_time_utc).getTime()
-      if (!map.has(label)) map.set(label, { label, ts, events: [] })
-      map.get(label)!.events.push(ev)
+      const d = new Date(ev.release_time_utc)
+      const dUTC = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+      if (!byDate.has(dUTC)) byDate.set(dUTC, [])
+      byDate.get(dUTC)!.push(ev)
     }
-    return [...map.values()].sort((a, b) => a.ts - b.ts)
+
+    const dateLabel = (dUTC: number): string => {
+      const diff = (dUTC - todayUTC) / 86400000
+      if (diff === 0) return 'Today'
+      if (diff === 1) return 'Tomorrow'
+      const d = new Date(dUTC)
+      return d.toLocaleDateString('en-GB', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+    }
+
+    const past: { label: string; dUTC: number; events: CalEvent[] }[] = []
+    let todayGrp: { label: string; dUTC: number; events: CalEvent[] } | null = null
+    const future: { label: string; dUTC: number; events: CalEvent[] }[] = []
+
+    const sortedDates = [...byDate.keys()].sort((a, b) => a - b)
+    for (const dUTC of sortedDates) {
+      const evs = (byDate.get(dUTC) ?? []).sort(
+        (a, b) => new Date(a.release_time_utc).getTime() - new Date(b.release_time_utc).getTime()
+      )
+      const grp = { label: dateLabel(dUTC), dUTC, events: evs }
+      if (dUTC < todayUTC) past.push(grp)
+      else if (dUTC === todayUTC) todayGrp = grp
+      else future.push(grp)
+    }
+
+    return { pastGroups: past, todayGroup: todayGrp, futureGroups: future }
   }, [filtered])
+
+  const toggleRow = useCallback((id: string) => {
+    setExpandedId(prev => prev === id ? null : id)
+  }, [])
+
+  const renderGroup = (grp: { label: string; dUTC: number; events: CalEvent[] }, isPast: boolean) => (
+    <div key={grp.dUTC} className="cal2-group">
+      <div className="cal2-group-header">
+        <span>{grp.label}</span>
+        {isPast && <span className="cal2-group-meta">{grp.events.length} events</span>}
+      </div>
+      <div className="cal2-table">
+        <div className="cal2-table-head">
+          <span className="cal2-time" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Time</span>
+          <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>CCY</span>
+          <span className="cal2-name" style={{ color: 'var(--text-dim)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Event</span>
+          <span />
+          <span className="cal2-num" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Fcst</span>
+          <span className="cal2-num" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Prev</span>
+          <span className="cal2-actual" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Actual</span>
+        </div>
+        {grp.events.map((ev, i) => {
+          const rowId = ev.event_code ?? `${ev.currency}-${grp.dUTC}-${i}`
+          return (
+            <CalendarEventRow
+              key={rowId}
+              ev={ev}
+              isExpanded={expandedId === rowId}
+              onToggle={() => toggleRow(rowId)}
+            />
+          )
+        })}
+      </div>
+    </div>
+  )
+
+  const totalPast = pastGroups.reduce((s, g) => s + g.events.length, 0)
 
   return (
     <div className="page">
-      {toast && <div className="toast">{toast}</div>}
-
-      <div className="cal-toolbar">
-        <button className="cal-sync-btn" onClick={syncActuals} disabled={syncing}>
-          {syncing ? <Spinner /> : '🔄'} Sync Actuals
-        </button>
-        <button className="cal-sync-btn" onClick={load} disabled={loading}>
-          {loading ? <Spinner /> : '↻'} Refresh
-        </button>
-      </div>
-
       {loading && (
         <div className="loading-center"><Spinner /><span>Loading calendar…</span></div>
       )}
@@ -640,14 +735,19 @@ function CalendarPage({ ccySel, now }: { ccySel: string[]; now: number }) {
         </div>
       )}
 
-      {!loading && groups.map(g => (
-        <div key={g.label} className="cal-group">
-          <div className="cal-group-header">{g.label}</div>
-          {g.events.map((ev, i) => (
-            <CalendarEventRow key={ev.event_code ?? `${ev.currency}-${i}`} ev={ev} now={now} />
-          ))}
+      {!loading && totalPast > 0 && (
+        <div className="cal2-past-toggle">
+          <button className="cal-sync-btn" onClick={() => setPastExpanded(v => !v)}>
+            {pastExpanded ? `▲ Hide ${totalPast} past event${totalPast !== 1 ? 's' : ''}` : `▼ Show ${totalPast} past event${totalPast !== 1 ? 's' : ''}`}
+          </button>
         </div>
-      ))}
+      )}
+
+      {!loading && pastExpanded && pastGroups.map(g => renderGroup(g, true))}
+
+      {!loading && todayGroup && renderGroup(todayGroup, false)}
+
+      {!loading && futureGroups.map(g => renderGroup(g, false))}
     </div>
   )
 }
@@ -661,8 +761,7 @@ function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTren
     return (
       <div className="trend-card">
         <div className="trend-card-head">
-          <span>{FLAG[ccy] ?? ''}</span>
-          <span>{ccy}</span>
+          <span className="ccy-badge">{ccy}</span>
         </div>
         <div className="trend-no-data">Not enough data yet</div>
       </div>
@@ -687,13 +786,11 @@ function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTren
   return (
     <div className="trend-card">
       <div className="trend-card-head">
-        <span>{FLAG[ccy] ?? ''}</span>
-        <span>{ccy}</span>
-        {improving && <span className="trend-improving">↑ improving</span>}
+        <span className="ccy-badge">{ccy}</span>
+        {improving && <span className="trend-improving">improving</span>}
       </div>
       <div className="trend-svg-wrap">
         <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} aria-label={`${ccy} accuracy trend`}>
-          {/* Grid lines */}
           {[0, 50, 100].map(v => {
             if (v < minVal || v > maxVal) return null
             const y = yScale(v)
@@ -705,27 +802,24 @@ function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTren
               </g>
             )
           })}
-          {/* 50% reference */}
           {minVal < 50 && maxVal > 50 && (
             <line x1={PAD.left} y1={yScale(50)} x2={W - PAD.right} y2={yScale(50)}
-              stroke="rgba(99,102,241,0.3)" strokeWidth={1} strokeDasharray="4 4" />
+              stroke="rgba(59,130,246,0.3)" strokeWidth={1} strokeDasharray="4 4" />
           )}
-          {/* Line */}
           <polyline
             points={points}
             fill="none"
-            stroke="#6366f1"
+            stroke="#3b82f6"
             strokeWidth={2}
             strokeLinejoin="round"
           />
-          {/* Dots */}
           {windows.map((w, i) => (
             <circle
               key={i}
               cx={xScale(i)}
               cy={yScale(w.hit_rate_pct)}
               r={3}
-              fill="#6366f1"
+              fill="#3b82f6"
             />
           ))}
         </svg>
@@ -767,7 +861,6 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
     )
   }
 
-  // Calibration: compute from accStats
   const calibRows = (accStats?.confidence_stats ?? []).filter(c => c.total > 0)
   const bucketMidpoints: Record<string, number> = {
     '<60%': 55, '60-70%': 65, '70-80%': 75, '>80%': 85,
@@ -776,7 +869,6 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
   return (
     <div className="page">
 
-      {/* Section 1: Learning Status */}
       <div className="section-title">Learning Status</div>
       {filtModels.length === 0 ? (
         <div className="empty-state"><p>No data for selected currencies.</p></div>
@@ -785,8 +877,7 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
           {filtModels.map(m => (
             <div key={m.currency} className="model-card">
               <div className="model-card-head">
-                <span className="model-flag">{FLAG[m.currency] ?? ''}</span>
-                <span className="model-ccy">{m.currency}</span>
+                <span className="ccy-badge model-ccy">{m.currency}</span>
                 <span className={`status-badge ${m.status}`}>
                   {m.status === 'learning' ? 'Learning' : m.status === 'seeded_only' ? 'Seeded' : 'Untrained'}
                 </span>
@@ -803,7 +894,6 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
         </div>
       )}
 
-      {/* Section 2: Feature Importance */}
       <div className="section-title">Feature Importance</div>
       {filtModels.length === 0 ? (
         <div className="empty-state"><p>No data.</p></div>
@@ -814,8 +904,7 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
             return (
               <div key={m.currency} className="fw-card">
                 <div className="fw-card-head">
-                  <span>{FLAG[m.currency] ?? ''}</span>
-                  <span>{m.currency}</span>
+                  <span className="ccy-badge">{m.currency}</span>
                 </div>
                 {FW_KEYS.map((k, i) => {
                   const w = weights[k] ?? 0
@@ -838,7 +927,6 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
         </div>
       )}
 
-      {/* Section 3: Accuracy Trend */}
       <div className="section-title">Accuracy Trend</div>
       {filtTrend.length === 0 ? (
         <div className="empty-state"><p>No trend data yet.</p></div>
@@ -850,7 +938,6 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
         </div>
       )}
 
-      {/* Section 4: Calibration Check */}
       <div className="section-title">Calibration Check</div>
       {calibRows.length === 0 ? (
         <div className="empty-state"><p>No graded predictions yet.</p></div>
@@ -872,7 +959,9 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
                   {row.hit_rate_pct.toFixed(0)}%
                 </span>
                 <span className="calib-expected">exp. ~{expected}%</span>
-                {diverges && <span className="calib-flag-icon" title="Diverges from expected">⚠️</span>}
+                {diverges && (
+                  <span className="calib-flag-icon" title="Diverges from expected" style={{ color: 'var(--sell)', fontSize: 12 }}>!</span>
+                )}
               </div>
             )
           })}
@@ -936,7 +1025,6 @@ function TrackPage({ ccySel }: { ccySel: string[] }) {
   return (
     <div className="page">
 
-      {/* KPI row */}
       <div className="kpi-row">
         <div className="kpi-card">
           <div className="kpi-value">{filtered.length}</div>
@@ -956,7 +1044,6 @@ function TrackPage({ ccySel }: { ccySel: string[] }) {
         </div>
       </div>
 
-      {/* Confidence bucket accuracy */}
       {accStats && accStats.confidence_stats.filter(c => c.total > 0).length > 0 && (
         <>
           <div className="section-title">Accuracy by Confidence</div>
@@ -975,7 +1062,6 @@ function TrackPage({ ccySel }: { ccySel: string[] }) {
         </>
       )}
 
-      {/* Result filter */}
       <div className="result-filter" role="group" aria-label="Filter results">
         {(['all', 'wins', 'losses'] as ResultFilter[]).map(f => (
           <button
@@ -989,7 +1075,6 @@ function TrackPage({ ccySel }: { ccySel: string[] }) {
         ))}
       </div>
 
-      {/* Ledger */}
       {ledger.length === 0 ? (
         <div className="empty-state">
           <p>{filtered.length === 0 ? 'No history for selected currencies.' : 'No results match this filter.'}</p>
@@ -1011,12 +1096,17 @@ function TrackPage({ ccySel }: { ccySel: string[] }) {
               {ledger.map(item => (
                 <tr key={item.id}>
                   <td className="ledger-event" title={item.display_name}>{item.display_name}</td>
-                  <td style={{ whiteSpace: 'nowrap' }}>{FLAG[item.currency] ?? ''} {item.currency}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{item.currency}</td>
                   <td className={`ledger-dir ${directionClass(item.lean_direction)}`}>
                     {directionLabel(item.lean_direction)}
                   </td>
                   <td className="ledger-conf">{item.confidence_pct.toFixed(0)}%</td>
-                  <td className="ledger-result">{item.was_correct ? '✅' : '❌'}</td>
+                  <td className="ledger-result">
+                    {item.was_correct
+                      ? <span className="badge badge-buy">W</span>
+                      : <span className="badge badge-sell">L</span>
+                    }
+                  </td>
                   <td className="ledger-date">{item.date ? formatDate(item.date) : '—'}</td>
                 </tr>
               ))}
@@ -1036,7 +1126,6 @@ export default function App() {
   const [page, setPage] = useState<Page>('home')
   const [now, setNow] = useState(Date.now())
 
-  // Persisted currency filter — default USD on first load
   const [ccySel, setCcySel] = useState<string[]>(() => ls(LS_KEY, ['USD']))
 
   useEffect(() => {
@@ -1046,7 +1135,6 @@ export default function App() {
 
   const toggleCcy = useCallback((c: string) => {
     setCcySel(prev => {
-      // Must keep at least one selected
       if (prev.includes(c) && prev.length === 1) return prev
       const next = prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c]
       saveLs(LS_KEY, next)
@@ -1064,7 +1152,7 @@ export default function App() {
 
           <main>
             {page === 'home' && <HomePage ccySel={ccySel} now={now} />}
-            {page === 'calendar' && <CalendarPage ccySel={ccySel} now={now} />}
+            {page === 'calendar' && <CalendarPage ccySel={ccySel} />}
             {page === 'model' && <ModelPage ccySel={ccySel} />}
             {page === 'track' && <TrackPage ccySel={ccySel} />}
           </main>
