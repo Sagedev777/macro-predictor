@@ -49,19 +49,6 @@ scheduler: Optional[BackgroundScheduler] = None
 _INVERSE_EVENTS = {
     # USD
     "JOBLESS_CLAIMS", "UNEMPLOYMENT_RATE",
-    # EUR
-    "EUR_UNEMPLOYMENT",
-    # GBP
-    "GBP_EMPLOYMENT",    # claimant count: higher = bearish
-    # AUD
-    "AUD_EMPLOYMENT",    # unemployment rate: higher = bearish
-    # CAD
-    "CAD_EMPLOYMENT",
-    # NZD
-    "NZD_EMPLOYMENT",
-    # CHF
-    "CHF_UNEMPLOYMENT",
-    # JPY — no inverse events currently configured
 }
 
 
@@ -195,7 +182,7 @@ def check_and_alert_upcoming():
 
     db = SessionLocal()
     try:
-        events  = fetch_upcoming_red_folder_events(force_refresh=True)
+        events  = fetch_upcoming_red_folder_events(force_refresh=False)
         now_utc = datetime.utcnow()
 
         for ev in events:
@@ -244,25 +231,18 @@ def check_and_alert_upcoming():
                             PredictionModel.release_time_utc == rel_str,
                         ).first()
 
-                        # Build pair signals for Telegram message enrichment
-                        from learning import compute_all_pair_biases, get_all_strengths
-                        from indicators import get_latest_currency_strengths
-                        db_snap   = get_latest_currency_strengths()
-                        fmap      = {
-                            c: build_features(
-                                float(db_snap.get(c, {}).get("indicator_score") or 0),
-                                float(db_snap.get(c, {}).get("rate_diff_score") or 0),
-                                float(db_snap.get(c, {}).get("cot_score")       or 0),
-                                float(db_snap.get(c, {}).get("sentiment_score") or 0),
-                            )
-                            for c in CURRENCIES
-                        }
-                        strengths   = get_all_strengths(fmap)
-                        pair_biases = compute_all_pair_biases(strengths)
+                        # Build pair signals from event config trade_signals
+                        _raw_dir_pre = pred_result.get("lean_direction", "")
+                        _dir_key_pre = (
+                            "BULLISH" if _raw_dir_pre.upper() in ("BEAT", "BULLISH") else
+                            "BEARISH" if _raw_dir_pre.upper() in ("MISS", "BEARISH") else
+                            "INLINE"
+                        )
+                        _trade_signals = event_cfg.get("trade_signals", {}).get(_dir_key_pre, [])
                         pair_signals = [
-                            {"pair": p, "direction": pb.direction, "confidence_pct": pb.confidence_pct}
-                            for p, pb in pair_biases.items()
-                            if pb.base == currency or pb.quote == currency
+                            {"pair": s.split()[-1], "direction": s.split()[0]}
+                            for s in _trade_signals
+                            if s and not s.upper().startswith("WAIT")
                         ]
 
                         if not existing:

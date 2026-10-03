@@ -181,48 +181,6 @@
   justify-content: center;
 }
 
-/* ── Currency Filter ────────────────────────────────────────────────────────── */
-.ccy-filter {
-  display: flex;
-  gap: 6px;
-  padding: 12px 16px;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--border);
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  background: var(--surface);
-}
-.ccy-filter::-webkit-scrollbar { display: none; }
-
-.ccy-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 12px;
-  height: 36px;
-  border-radius: 18px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-.ccy-chip.on {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-.ccy-chip:hover:not(.on) {
-  border-color: var(--accent);
-  color: var(--text);
-}
-
 /* ── Page wrapper ───────────────────────────────────────────────────────────── */
 .page {
   padding: 16px;
@@ -1096,59 +1054,128 @@
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 14px;
+  overflow-x: auto;
+}
+
+.calib-table-head {
+  display: grid;
+  grid-template-columns: 72px 60px 1fr 48px 36px;
+  gap: 8px;
+  padding: 0 0 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .calib-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 72px 60px 1fr 48px 36px;
+  gap: 8px;
   align-items: center;
-  gap: 10px;
   padding: 8px 0;
   border-bottom: 1px solid var(--border);
 }
 .calib-row:last-child { border-bottom: none; }
+.calib-row.calib-flagged { background: rgba(239,68,68,0.04); border-radius: 6px; padding: 8px 6px; }
 
 .calib-bucket {
   font-size: 12px;
-  color: var(--text-dim);
-  width: 64px;
-  flex-shrink: 0;
+  color: var(--text);
+  font-weight: 600;
 }
-
-.calib-bar-outer {
-  flex: 1;
-  height: 10px;
-  border-radius: 5px;
-  background: rgba(255,255,255,0.08);
-  overflow: hidden;
-}
-
-.calib-bar-inner {
-  height: 100%;
-  border-radius: 5px;
-  background: var(--accent);
-  transition: width 0.5s;
-}
-.calib-bar-inner.flag { background: var(--sell); }
 
 .calib-pct {
   font-size: 13px;
   font-weight: 600;
-  width: 40px;
-  text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-.calib-flag-icon {
-  font-size: 14px;
-  flex-shrink: 0;
+.calib-flag { display: flex; align-items: center; }
+
+.flag-warn {
+  display: inline-block;
+  background: rgba(239,68,68,0.15);
+  color: var(--sell);
+  border: 1px solid rgba(239,68,68,0.35);
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 5px;
 }
 
 .calib-expected {
   font-size: 11px;
   color: var(--text-dim);
-  width: 52px;
-  text-align: right;
 }
+
+/* Mistake log */
+.mistake-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mistake-row {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.mistake-row:hover { border-color: var(--sell); }
+
+.mistake-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.mistake-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.mistake-date {
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.mistake-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mistake-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.mistake-label {
+  color: var(--text-dim);
+  width: 100px;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.mistake-conf {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.mistake-nums {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+
 
 /* ══════════════════════════════════════════════════════════════════════════════
    TRACK RECORD PAGE

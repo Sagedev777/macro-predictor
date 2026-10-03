@@ -4,8 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import React from 'react'
 
 const API = '/api'
-const LS_KEY = 'macro_currency_filter'
-const ALL_CCYS = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CHF', 'CAD', 'NZD']
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -155,13 +153,6 @@ function buildPairsFromPred(pred: PredSummary): { dir: string; pair: string }[] 
     .map(ps => ({ dir: ps.direction.toUpperCase().includes('BUY') || ps.direction.toUpperCase() === 'BULLISH' ? 'BUY' : 'SELL', pair: ps.pair }))
 }
 
-function ls<T>(key: string, fallback: T): T {
-  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback } catch { return fallback }
-}
-function saveLs(key: string, val: unknown) {
-  try { localStorage.setItem(key, JSON.stringify(val)) } catch { /* noop */ }
-}
-
 function fmtNum(n: number | null, dp = 3): string {
   return n == null ? '—' : n.toFixed(dp)
 }
@@ -170,24 +161,6 @@ function fmtNum(n: number | null, dp = 3): string {
 
 function Spinner() {
   return <div className="spinner" role="status" aria-label="Loading" />
-}
-
-function CurrencyFilter({ sel, toggle }: { sel: string[]; toggle: (c: string) => void }) {
-  return (
-    <div className="ccy-filter" role="list" aria-label="Currency filter">
-      {ALL_CCYS.map(c => (
-        <button
-          key={c}
-          role="listitem"
-          className={`ccy-chip${sel.includes(c) ? ' on' : ''}`}
-          onClick={() => toggle(c)}
-          aria-pressed={sel.includes(c)}
-        >
-          {c}
-        </button>
-      ))}
-    </div>
-  )
 }
 
 function ConfBar({ pct, cls }: { pct: number; cls?: string }) {
@@ -318,7 +291,7 @@ function ImpactDot({ impact }: { impact: string }) {
 // HOME PAGE
 // ══════════════════════════════════════════════════════════════════════════════
 
-function HomePage({ ccySel, now }: { ccySel: string[]; now: number }) {
+function HomePage({ now }: { now: number }) {
   const [events, setEvents] = useState<CalEvent[]>([])
   const [loading, setLoading] = useState(true)
   const warmupFired = useRef(false)
@@ -356,30 +329,26 @@ function HomePage({ ccySel, now }: { ccySel: string[]; now: number }) {
     return () => clearInterval(id)
   }, [])
 
-  // Find next upcoming event matching selected currencies
+  // Find next upcoming event (all events are USD)
   const nextEvent = useMemo(() => {
     if (events.length === 0) return null
     const nowMs = now
 
-    const filtered = events
-      .filter(e => e.release_time_utc && ccySel.includes(e.currency))
-
-    if (filtered.length === 0) return null
-
-    const upcoming = filtered
-      .filter(e => new Date(e.release_time_utc).getTime() > nowMs && e.actual === null)
+    const upcoming = events
+      .filter(e => e.release_time_utc && new Date(e.release_time_utc).getTime() > nowMs && e.actual === null)
       .sort((a, b) => new Date(a.release_time_utc).getTime() - new Date(b.release_time_utc).getTime())
     if (upcoming.length > 0) return upcoming[0]
 
-    const anyFuture = filtered
-      .filter(e => new Date(e.release_time_utc).getTime() > nowMs)
+    const anyFuture = events
+      .filter(e => e.release_time_utc && new Date(e.release_time_utc).getTime() > nowMs)
       .sort((a, b) => new Date(a.release_time_utc).getTime() - new Date(b.release_time_utc).getTime())
     if (anyFuture.length > 0) return anyFuture[0]
 
-    const past = filtered
+    const past = events
+      .filter(e => e.release_time_utc)
       .sort((a, b) => new Date(b.release_time_utc).getTime() - new Date(a.release_time_utc).getTime())
     return past[0] ?? null
-  }, [events, ccySel, now])
+  }, [events, now])
 
   if (loading) {
     return (
@@ -621,7 +590,7 @@ function CalendarEventRow({ ev, isExpanded, onToggle }: {
   )
 }
 
-function CalendarPage({ ccySel }: { ccySel: string[] }) {
+function CalendarPage() {
   const [events, setEvents] = useState<CalEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -641,18 +610,13 @@ function CalendarPage({ ccySel }: { ccySel: string[] }) {
     return () => clearInterval(id)
   }, [load])
 
-  const filtered = useMemo(
-    () => events.filter(e => ccySel.includes(e.currency)),
-    [events, ccySel]
-  )
-
-  // Group into past days, today, and future days
+  // Group into past days, today, and future days (all events are USD)
   const { pastGroups, todayGroup, futureGroups } = useMemo(() => {
     const today = new Date()
     const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
 
     const byDate = new Map<number, CalEvent[]>()
-    for (const ev of filtered) {
+    for (const ev of events) {
       const d = new Date(ev.release_time_utc)
       const dUTC = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
       if (!byDate.has(dUTC)) byDate.set(dUTC, [])
@@ -682,8 +646,18 @@ function CalendarPage({ ccySel }: { ccySel: string[] }) {
       else future.push(grp)
     }
 
+    // If calendar is stale (no today/future events), promote the most recent
+    // past day into "todayGroup" and the rest into future so they show by default
+    if (!todayGrp && future.length === 0 && past.length > 0) {
+      const mostRecent = past[past.length - 1]
+      todayGrp = { ...mostRecent, label: mostRecent.label + ' · most recent' }
+      const remaining = past.slice(0, -1)
+      // Show all days from stale cache — promote them all to future so they're visible
+      return { pastGroups: [], todayGroup: todayGrp, futureGroups: remaining.reverse() }
+    }
+
     return { pastGroups: past, todayGroup: todayGrp, futureGroups: future }
-  }, [filtered])
+  }, [events])
 
   const toggleRow = useCallback((id: string) => {
     setExpandedId(prev => prev === id ? null : id)
@@ -728,10 +702,10 @@ function CalendarPage({ ccySel }: { ccySel: string[] }) {
         <div className="loading-center"><Spinner /><span>Loading calendar…</span></div>
       )}
 
-      {!loading && filtered.length === 0 && (
+      {!loading && events.length === 0 && (
         <div className="empty-state">
-          <p>No events match selected currencies.</p>
-          <p className="sub">Toggle currencies in the filter bar above.</p>
+          <p>No events found.</p>
+          <p className="sub">Calendar will refresh automatically.</p>
         </div>
       )}
 
@@ -756,7 +730,18 @@ function CalendarPage({ ccySel }: { ccySel: string[] }) {
 // MODEL PROGRESS PAGE
 // ══════════════════════════════════════════════════════════════════════════════
 
+// Calibration row type (matches /api/calibration array response)
+interface CalibRow {
+  bucket: string
+  stated_midpoint: number
+  actual_win_rate: number
+  count: number
+  flagged: boolean
+}
+
 function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTrendWindow[]; improving: boolean }) {
+  const ccyColor = '#3b82f6'  // USD blue
+
   if (windows.length < 2) {
     return (
       <div className="trend-card">
@@ -769,19 +754,18 @@ function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTren
   }
 
   const W = 300
-  const H = 100
-  const PAD = { top: 10, right: 10, bottom: 20, left: 30 }
+  const H = 120
+  const PAD = { top: 14, right: 14, bottom: 24, left: 34 }
   const chartW = W - PAD.left - PAD.right
   const chartH = H - PAD.top - PAD.bottom
 
-  const vals = windows.map(w => w.hit_rate_pct)
-  const minVal = Math.max(0, Math.min(...vals) - 5)
-  const maxVal = Math.min(100, Math.max(...vals) + 5)
-
-  const xScale = (i: number) => PAD.left + (i / (windows.length - 1)) * chartW
-  const yScale = (v: number) => PAD.top + chartH - ((v - minVal) / (maxVal - minVal)) * chartH
+  const xScale = (i: number) => PAD.left + (i / Math.max(windows.length - 1, 1)) * chartW
+  const yScale = (v: number) => PAD.top + chartH - (v / 100) * chartH
 
   const points = windows.map((w, i) => `${xScale(i)},${yScale(w.hit_rate_pct)}`).join(' ')
+
+  const firstDate = windows[0]?.date_from ? new Date(windows[0].date_from).toLocaleDateString('en-GB', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : ''
+  const lastDate = windows[windows.length - 1]?.date_to ? new Date(windows[windows.length - 1].date_to!).toLocaleDateString('en-GB', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : ''
 
   return (
     <div className="trend-card">
@@ -790,36 +774,42 @@ function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTren
         {improving && <span className="trend-improving">improving</span>}
       </div>
       <div className="trend-svg-wrap">
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} aria-label={`${ccy} accuracy trend`}>
-          {[0, 50, 100].map(v => {
-            if (v < minVal || v > maxVal) return null
-            const y = yScale(v)
-            return (
-              <g key={v}>
-                <line x1={PAD.left} y1={y} x2={W - PAD.right} y2={y}
-                  stroke="rgba(255,255,255,0.05)" strokeWidth={1} />
-                <text x={PAD.left - 4} y={y + 4} fontSize={8} fill="rgba(255,255,255,0.3)" textAnchor="end">{v}</text>
-              </g>
-            )
-          })}
-          {minVal < 50 && maxVal > 50 && (
-            <line x1={PAD.left} y1={yScale(50)} x2={W - PAD.right} y2={yScale(50)}
-              stroke="rgba(59,130,246,0.3)" strokeWidth={1} strokeDasharray="4 4" />
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={120} aria-label={`${ccy} accuracy trend`}>
+          {/* Y-axis grid lines at 0 and 100 */}
+          {([0, 100] as number[]).map(v => (
+            <g key={v}>
+              <line x1={PAD.left} y1={yScale(v)} x2={W - PAD.right} y2={yScale(v)}
+                stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+              <text x={PAD.left - 4} y={yScale(v) + 4} fontSize={8} fill="rgba(255,255,255,0.3)" textAnchor="end">{v}</text>
+            </g>
+          ))}
+          {/* Baseline at 50% (dashed accent) */}
+          <line x1={PAD.left} y1={yScale(50)} x2={W - PAD.right} y2={yScale(50)}
+            stroke="rgba(59,130,246,0.35)" strokeWidth={1} strokeDasharray="4 3" />
+          <text x={PAD.left - 4} y={yScale(50) + 4} fontSize={8} fill="rgba(59,130,246,0.5)" textAnchor="end">50</text>
+          {/* X tick labels */}
+          {firstDate && (
+            <text x={PAD.left} y={H - 4} fontSize={8} fill="rgba(255,255,255,0.3)" textAnchor="start">{firstDate}</text>
           )}
+          {lastDate && windows.length > 1 && (
+            <text x={W - PAD.right} y={H - 4} fontSize={8} fill="rgba(255,255,255,0.3)" textAnchor="end">{lastDate}</text>
+          )}
+          {/* Polyline */}
           <polyline
             points={points}
             fill="none"
-            stroke="#3b82f6"
+            stroke={ccyColor}
             strokeWidth={2}
             strokeLinejoin="round"
           />
+          {/* Dots */}
           {windows.map((w, i) => (
             <circle
               key={i}
               cx={xScale(i)}
               cy={yScale(w.hit_rate_pct)}
               r={3}
-              fill="#3b82f6"
+              fill={ccyColor}
             />
           ))}
         </svg>
@@ -828,30 +818,32 @@ function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTren
   )
 }
 
-function ModelPage({ ccySel }: { ccySel: string[] }) {
-  const [models, setModels] = useState<ModelStatus[]>([])
-  const [trend, setTrend] = useState<AccTrendCcy[]>([])
-  const [accStats, setAccStats] = useState<AccStats | null>(null)
-  const [loading, setLoading] = useState(true)
+function ModelPage() {
+  const [models,   setModels]   = useState<ModelStatus[]>([])
+  const [trend,    setTrend]    = useState<AccTrendCcy[]>([])
+  const [mistakes, setMistakes] = useState<HistItem[]>([])
+  const [calibration, setCalib] = useState<CalibRow[]>([])
+  const [loading,  setLoading]  = useState(true)
 
   useEffect(() => {
     setLoading(true)
     Promise.all([
       axios.get(`${API}/model-status`),
       axios.get(`${API}/accuracy-trend`),
-      axios.get(`${API}/accuracy`),
+      axios.get(`${API}/history?limit=60`),
+      axios.get(`${API}/calibration`),
     ])
-      .then(([ms, at, ac]) => {
+      .then(([ms, at, hist, calib]) => {
         setModels(ms.data.currencies ?? [])
         setTrend(at.data.trend ?? [])
-        setAccStats(ac.data)
+        // filter wrong predictions only
+        const allHist: HistItem[] = hist.data.history ?? []
+        setMistakes(allHist.filter(h => h.was_correct === false))
+        setCalib(Array.isArray(calib.data) ? calib.data : [])
       })
-      .catch(() => { /* show empty state */ })
+      .catch(() => {})
       .finally(() => setLoading(false))
   }, [])
-
-  const filtModels = useMemo(() => models.filter(m => ccySel.includes(m.currency)), [models, ccySel])
-  const filtTrend = useMemo(() => trend.filter(t => ccySel.includes(t.currency)), [trend, ccySel])
 
   if (loading) {
     return (
@@ -861,20 +853,28 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
     )
   }
 
-  const calibRows = (accStats?.confidence_stats ?? []).filter(c => c.total > 0)
-  const bucketMidpoints: Record<string, number> = {
-    '<60%': 55, '60-70%': 65, '70-80%': 75, '>80%': 85,
-  }
-
   return (
     <div className="page">
 
-      <div className="section-title">Learning Status</div>
-      {filtModels.length === 0 ? (
-        <div className="empty-state"><p>No data for selected currencies.</p></div>
+      {/* ── SECTION 1: Accuracy Trend ──────────────────────────────────── */}
+      <div className="section-title">1 · Accuracy Trend</div>
+      {trend.filter(t => t.currency !== 'ALL').length === 0 ? (
+        <div className="empty-state"><p>No trend data available yet.</p></div>
+      ) : (
+        <div className="trend-charts-grid">
+          {trend.filter(t => t.currency !== 'ALL').map(t => (
+            <TrendChart key={t.currency} ccy={t.currency} windows={t.windows} improving={t.improving} />
+          ))}
+        </div>
+      )}
+
+      {/* ── SECTION 2: n_trained per currency ─────────────────────────── */}
+      <div className="section-title">2 · Training Progress</div>
+      {models.length === 0 ? (
+        <div className="empty-state"><p>No model data available.</p></div>
       ) : (
         <div className="model-grid">
-          {filtModels.map(m => (
+          {models.map(m => (
             <div key={m.currency} className="model-card">
               <div className="model-card-head">
                 <span className="ccy-badge model-ccy">{m.currency}</span>
@@ -884,7 +884,7 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
               </div>
               <div className="model-n">n = {m.n_trained}</div>
               <div className="model-n-sub">
-                {m.n_real > 0 ? `${m.n_real} real learn_one() calls` : 'Seed data only (first 10 are seeds)'}
+                {m.n_real > 0 ? `${m.n_real} real outcomes` : 'Seed data only'}
               </div>
               {m.live_accuracy != null && (
                 <div className="model-acc">{(m.live_accuracy * 100).toFixed(1)}% accuracy</div>
@@ -894,12 +894,55 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
         </div>
       )}
 
-      <div className="section-title">Feature Importance</div>
-      {filtModels.length === 0 ? (
+      {/* ── SECTION 3: Mistake Log ────────────────────────────────────── */}
+      <div className="section-title">3 · Mistake Log</div>
+      {mistakes.length === 0 ? (
+        <div className="empty-state"><p>No wrong predictions recorded yet.</p></div>
+      ) : (
+        <div className="mistake-list">
+          {mistakes.map(h => {
+            const date = h.date ? new Date(h.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'
+            const surprise = h.surprise != null
+              ? (h.surprise > 0 ? `+${h.surprise}` : `${h.surprise}`)
+              : '—'
+            const outcome = h.actual != null && h.forecast != null
+              ? (h.actual > h.forecast ? 'BEAT' : h.actual < h.forecast ? 'MISS' : 'INLINE')
+              : '—'
+            return (
+              <div key={h.id} className="mistake-row">
+                <div className="mistake-header">
+                  <span className="mistake-name">{h.display_name}</span>
+                  <span className="mistake-date">{date}</span>
+                </div>
+                <div className="mistake-body">
+                  <div className="mistake-field">
+                    <span className="mistake-label">Predicted</span>
+                    <span className="badge badge-sell">{h.lean_direction}</span>
+                    <span className="mistake-conf">{h.confidence_pct.toFixed(0)}% conf</span>
+                  </div>
+                  <div className="mistake-field">
+                    <span className="mistake-label">Actual outcome</span>
+                    <span className={outcome === 'BEAT' ? 'text-bull' : 'text-bear'}>{outcome}</span>
+                    <span className="mistake-nums">fcst {h.forecast ?? '—'} / actual {h.actual ?? '—'} (surprise {surprise})</span>
+                  </div>
+                  <div className="mistake-field">
+                    <span className="mistake-label">Weight shift</span>
+                    <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>Model updated via learn_one()</span>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* ── SECTION 4: Feature Importance ────────────────────────────── */}
+      <div className="section-title">4 · Feature Importance</div>
+      {models.length === 0 ? (
         <div className="empty-state"><p>No data.</p></div>
       ) : (
         <div className="features-grid">
-          {filtModels.map(m => {
+          {models.map(m => {
             const weights = m.feature_weights ?? {}
             return (
               <div key={m.currency} className="fw-card">
@@ -927,46 +970,39 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
         </div>
       )}
 
-      <div className="section-title">Accuracy Trend</div>
-      {filtTrend.length === 0 ? (
-        <div className="empty-state"><p>No trend data yet.</p></div>
-      ) : (
-        <div className="trend-charts-grid">
-          {filtTrend.map(t => (
-            <TrendChart key={t.currency} ccy={t.currency} windows={t.windows} improving={t.improving} />
-          ))}
-        </div>
-      )}
-
-      <div className="section-title">Calibration Check</div>
-      {calibRows.length === 0 ? (
+      {/* ── SECTION 5: Calibration Check ─────────────────────────────── */}
+      <div className="section-title">5 · Calibration Check</div>
+      {calibration.length === 0 ? (
         <div className="empty-state"><p>No graded predictions yet.</p></div>
       ) : (
         <div className="calib-card">
-          {calibRows.map(row => {
-            const expected = bucketMidpoints[row.bucket] ?? 70
-            const diverges = Math.abs(row.hit_rate_pct - expected) > 10
+          <div className="calib-table-head">
+            <span>Bucket</span>
+            <span>Stated</span>
+            <span>Actual win rate</span>
+            <span>Count</span>
+            <span>Flag</span>
+          </div>
+          {calibration.map(row => {
+            const winPct = (row.actual_win_rate * 100).toFixed(1)
+            const diverge = row.flagged
             return (
-              <div key={row.bucket} className="calib-row">
+              <div key={row.bucket} className={`calib-row${diverge ? ' calib-flagged' : ''}`}>
                 <span className="calib-bucket">{row.bucket}</span>
-                <div className="calib-bar-outer">
-                  <div
-                    className={`calib-bar-inner${diverges ? ' flag' : ''}`}
-                    style={{ width: `${row.hit_rate_pct}%` }}
-                  />
-                </div>
-                <span className={`calib-pct${diverges ? ' text-bear' : ''}`}>
-                  {row.hit_rate_pct.toFixed(0)}%
+                <span className="calib-expected">~{row.stated_midpoint}%</span>
+                <span className={`calib-pct ${row.actual_win_rate * 100 >= row.stated_midpoint ? 'text-bull' : 'text-bear'}`}>
+                  {winPct}%
                 </span>
-                <span className="calib-expected">exp. ~{expected}%</span>
-                {diverges && (
-                  <span className="calib-flag-icon" title="Diverges from expected" style={{ color: 'var(--sell)', fontSize: 12 }}>!</span>
-                )}
+                <span style={{ color: 'var(--text-dim)', fontSize: 13 }}>{row.count}</span>
+                <span className="calib-flag">
+                  {diverge ? <span className="flag-warn">!</span> : <span style={{ color: 'var(--text-dim)' }}>—</span>}
+                </span>
               </div>
             )
           })}
         </div>
       )}
+
     </div>
   )
 }
@@ -977,7 +1013,7 @@ function ModelPage({ ccySel }: { ccySel: string[] }) {
 
 type ResultFilter = 'all' | 'wins' | 'losses'
 
-function TrackPage({ ccySel }: { ccySel: string[] }) {
+function TrackPage() {
   const [history, setHistory] = useState<HistItem[]>([])
   const [accStats, setAccStats] = useState<AccStats | null>(null)
   const [loading, setLoading] = useState(true)
@@ -997,21 +1033,16 @@ function TrackPage({ ccySel }: { ccySel: string[] }) {
       .finally(() => setLoading(false))
   }, [])
 
-  const filtered = useMemo(
-    () => history.filter(h => ccySel.includes(h.currency)),
-    [history, ccySel]
-  )
-
   const ledger = useMemo(() => {
-    if (resultFilter === 'wins') return filtered.filter(h => h.was_correct)
-    if (resultFilter === 'losses') return filtered.filter(h => !h.was_correct)
-    return filtered
-  }, [filtered, resultFilter])
+    if (resultFilter === 'wins') return history.filter(h => h.was_correct)
+    if (resultFilter === 'losses') return history.filter(h => !h.was_correct)
+    return history
+  }, [history, resultFilter])
 
-  const wins = useMemo(() => filtered.filter(h => h.was_correct).length, [filtered])
-  const winRate = filtered.length > 0 ? (wins / filtered.length) * 100 : 0
-  const avgConf = filtered.length > 0
-    ? filtered.reduce((s, h) => s + h.confidence_pct, 0) / filtered.length
+  const wins = useMemo(() => history.filter(h => h.was_correct).length, [history])
+  const winRate = history.length > 0 ? (wins / history.length) * 100 : 0
+  const avgConf = history.length > 0
+    ? history.reduce((s, h) => s + h.confidence_pct, 0) / history.length
     : 0
 
   if (loading) {
@@ -1027,18 +1058,18 @@ function TrackPage({ ccySel }: { ccySel: string[] }) {
 
       <div className="kpi-row">
         <div className="kpi-card">
-          <div className="kpi-value">{filtered.length}</div>
+          <div className="kpi-value">{history.length}</div>
           <div className="kpi-label">Predictions</div>
         </div>
         <div className="kpi-card">
           <div className={`kpi-value ${winRate >= 60 ? 'green' : winRate >= 50 ? 'yellow' : ''}`}>
-            {filtered.length > 0 ? `${winRate.toFixed(0)}%` : '—'}
+            {history.length > 0 ? `${winRate.toFixed(0)}%` : '—'}
           </div>
           <div className="kpi-label">Win Rate</div>
         </div>
         <div className="kpi-card">
           <div className="kpi-value yellow">
-            {filtered.length > 0 ? `${avgConf.toFixed(0)}%` : '—'}
+            {history.length > 0 ? `${avgConf.toFixed(0)}%` : '—'}
           </div>
           <div className="kpi-label">Avg Confidence</div>
         </div>
@@ -1077,7 +1108,7 @@ function TrackPage({ ccySel }: { ccySel: string[] }) {
 
       {ledger.length === 0 ? (
         <div className="empty-state">
-          <p>{filtered.length === 0 ? 'No history for selected currencies.' : 'No results match this filter.'}</p>
+          <p>{history.length === 0 ? 'No history recorded yet.' : 'No results match this filter.'}</p>
         </div>
       ) : (
         <div className="ledger-wrap">
@@ -1126,20 +1157,9 @@ export default function App() {
   const [page, setPage] = useState<Page>('home')
   const [now, setNow] = useState(Date.now())
 
-  const [ccySel, setCcySel] = useState<string[]>(() => ls(LS_KEY, ['USD']))
-
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [])
-
-  const toggleCcy = useCallback((c: string) => {
-    setCcySel(prev => {
-      if (prev.includes(c) && prev.length === 1) return prev
-      const next = prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c]
-      saveLs(LS_KEY, next)
-      return next
-    })
   }, [])
 
   return (
@@ -1148,13 +1168,11 @@ export default function App() {
         <SideNav page={page} setPage={setPage} />
 
         <div className="content">
-          <CurrencyFilter sel={ccySel} toggle={toggleCcy} />
-
           <main>
-            {page === 'home' && <HomePage ccySel={ccySel} now={now} />}
-            {page === 'calendar' && <CalendarPage ccySel={ccySel} />}
-            {page === 'model' && <ModelPage ccySel={ccySel} />}
-            {page === 'track' && <TrackPage ccySel={ccySel} />}
+            {page === 'home' && <HomePage now={now} />}
+            {page === 'calendar' && <CalendarPage />}
+            {page === 'model' && <ModelPage />}
+            {page === 'track' && <TrackPage />}
           </main>
         </div>
       </div>

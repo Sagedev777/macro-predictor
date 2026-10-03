@@ -104,18 +104,6 @@ class CotResult:
 _CURRENCY_KEYWORDS: dict[str, list[str]] = {
     "USD": ["federal reserve", "fed", "fomc", "dollar", "usd", "us economy",
             "us inflation", "us jobs", "nonfarm payrolls"],
-    "EUR": ["ecb", "european central bank", "euro", "eur", "eurozone",
-            "lagarde", "eu economy", "german", "france economy"],
-    "GBP": ["bank of england", "boe", "sterling", "gbp", "uk economy",
-            "uk inflation", "uk gdp", "bailey"],
-    "JPY": ["bank of japan", "boj", "yen", "jpy", "japan economy",
-            "ueda", "japan inflation"],
-    "AUD": ["rba", "reserve bank australia", "aussie", "aud", "australia economy",
-            "australia inflation"],
-    "CHF": ["snb", "swiss national bank", "franc", "chf", "switzerland economy"],
-    "CAD": ["bank of canada", "boc", "loonie", "cad", "canada economy",
-            "macklem", "canada inflation"],
-    "NZD": ["rbnz", "reserve bank new zealand", "kiwi", "nzd", "new zealand economy"],
 }
 
 
@@ -459,13 +447,6 @@ _COT_THRESHOLD = 0.10   # |net_long_pct| > 10% = directional
 # These match the strings used by the cot_reports library
 _COT_CONTRACT_NAMES: dict[str, str] = {
     "USD": "US DOLLAR INDEX - ICE FUTURES U.S.",
-    "EUR": "EURO FX - CHICAGO MERCANTILE EXCHANGE",
-    "GBP": "BRITISH POUND STERLING - CHICAGO MERCANTILE EXCHANGE",
-    "JPY": "JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE",
-    "AUD": "AUSTRALIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
-    "CHF": "SWISS FRANC - CHICAGO MERCANTILE EXCHANGE",
-    "CAD": "CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
-    "NZD": "NZ DOLLAR - CHICAGO MERCANTILE EXCHANGE",
 }
 
 # In-process COT cache: currency → (timestamp, CotResult)

@@ -7,6 +7,8 @@ Changes from original:
   - Includes both red-folder (high) AND orange-folder (medium) impact events
   - FF_EVENT_MAP expanded to cover all currency event codes in config/events.py
   - update_event_actual() signature unchanged (backward compatible)
+  - Fetches current week AND next week on 429 / network failure fallback
+  - Startup diagnostic logging: logs total fetched, filtered, and per-currency counts
 """
 
 import json
@@ -21,9 +23,13 @@ import requests
 
 log = logging.getLogger("calendar")
 
-FOREX_FACTORY_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+# Forex Factory publishes two week URLs — we try current then next on failure
+FF_URLS = [
+    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+]
 CACHE_FILE = "calendar_cache.json"
-CACHE_TTL_SECONDS = 900  # 15 minutes
+CACHE_TTL_SECONDS = 1800  # 30 minutes — FF updates at most every 15min; don't hammer the endpoint
 
 _in_memory_cache: dict = {
     "timestamp": 0,
@@ -31,7 +37,7 @@ _in_memory_cache: dict = {
 }
 
 # ── Tracked currencies ────────────────────────────────────────────────────────
-TRACKED_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CHF", "CAD", "NZD"}
+TRACKED_CURRENCIES = {"USD"}
 
 # ── Tracked impact tiers ──────────────────────────────────────────────────────
 TRACKED_IMPACTS = {"high", "medium"}   # red = high, orange = medium
@@ -99,145 +105,11 @@ FF_EVENT_MAP: dict[str, str] = {
     "Trade Balance":                            "TRADE_BALANCE",
     "Industrial Production m/m":               "INDUSTRIAL_PRODUCTION",
     "Capacity Utilization Rate":                "CAPACITY_UTILIZATION",
-
-    # ── EUR ───────────────────────────────────────────────────────────────────
-    "CPI Flash Estimate y/y":                   "EUR_CPI",
-    "CPI Flash Estimate m/m":                   "EUR_CPI",
-    "CPI y/y":                                  "EUR_CPI",   # country-code deduplication happens below
-    "Core CPI Flash Estimate y/y":              "EUR_CORE_CPI",
-    "Flash GDP q/q":                            "EUR_GDP",
-    "GDP q/q":                                  "EUR_GDP",   # country deduplication below
-    "Prelim Flash GDP q/q":                     "EUR_GDP",
-    "Main Refinancing Rate":                    "ECB_RATE",
-    "Refinancing Rate":                         "ECB_RATE",
-    "ECB Press Conference":                     "ECB_RATE",
-    "ECB Monetary Policy Statement":            "ECB_RATE",
-    "Flash Manufacturing PMI":                  "EUR_PMI_MFG",
-    "Manufacturing PMI":                        "EUR_PMI_MFG",
-    "Flash Services PMI":                       "EUR_PMI_SERVICES",
-    "Services PMI":                             "EUR_PMI_SERVICES",
-    "Unemployment Rate":                        "EUR_UNEMPLOYMENT",   # deduped below
-    "German Ifo Business Climate":              "GERMAN_IFO",
-    "Ifo Business Climate":                     "GERMAN_IFO",
-    "German ZEW Economic Sentiment":            "GERMAN_ZEW",
-    "ZEW Economic Sentiment":                   "GERMAN_ZEW",
-    "German Prelim GDP q/q":                    "EUR_GDP",
-    "German Final GDP q/q":                     "EUR_GDP",
-    "French Flash GDP q/q":                     "EUR_GDP",
-
-    # ── GBP ───────────────────────────────────────────────────────────────────
-    "CPI y/y":                                  "GBP_CPI",   # deduped below
-    "CPI m/m":                                  "GBP_CPI",
-    "Core CPI y/y":                             "GBP_CORE_CPI",
-    "GDP m/m":                                  "GBP_GDP",
-    "GDP q/q":                                  "GBP_GDP",
-    "Prelim GDP q/q":                           "GBP_GDP",
-    "Official Bank Rate":                       "BOE_RATE",
-    "MPC Official Bank Rate Votes":             "BOE_RATE",
-    "BOE Inflation Report":                     "BOE_RATE",
-    "BOE Monetary Policy Report":               "BOE_RATE",
-    "Claimant Count Change":                    "GBP_EMPLOYMENT",
-    "Employment Change 3m/3m":                  "GBP_EMPLOYMENT",
-    "Average Earnings Index 3m/y":              "GBP_EMPLOYMENT",
-    "Manufacturing PMI":                        "GBP_PMI_MFG",   # deduped below
-    "Services PMI":                             "GBP_PMI_SERVICES",
-    "Retail Sales m/m":                         "GBP_RETAIL_SALES",
-    "Core Retail Sales m/m":                    "GBP_RETAIL_SALES",
-
-    # ── JPY ───────────────────────────────────────────────────────────────────
-    "National Core CPI y/y":                    "JPY_CPI",
-    "Tokyo Core CPI y/y":                       "JPY_CPI",
-    "Monetary Policy Statement":                "BOJ_RATE",
-    "BOJ Press Conference":                     "BOJ_RATE",
-    "Overnight Call Rate":                      "BOJ_RATE",
-    "BOJ Outlook Report":                       "BOJ_RATE",
-    "Prelim GDP q/q":                           "JAPAN_GDP",   # deduped by country below
-    "Flash GDP q/q":                            "JAPAN_GDP",
-    "Tankan Large Manufacturers Index":         "JAPAN_TANKAN",
-    "Tankan Non-Manufacturing Index":           "JAPAN_TANKAN",
-
-    # ── AUD ───────────────────────────────────────────────────────────────────
-    "Trimmed Mean CPI q/q":                     "AUD_CPI",
-    "CPI q/q":                                  "AUD_CPI",   # deduped by country below
-    "CPI y/y":                                  "AUD_CPI",
-    "RBA Rate Statement":                       "RBA_RATE",
-    "Cash Rate":                                "RBA_RATE",
-    "RBA Monetary Policy Statement":            "RBA_RATE",
-    "Employment Change":                        "AUD_EMPLOYMENT",   # deduped below
-    "Unemployment Rate":                        "AUD_EMPLOYMENT",
-    "Retail Sales m/m":                         "AUD_RETAIL_SALES",
-
-    # ── CAD ───────────────────────────────────────────────────────────────────
-    "CPI m/m":                                  "CAD_CPI",   # deduped by country
-    "CPI y/y":                                  "CAD_CPI",
-    "Overnight Rate":                           "BOC_RATE",
-    "BOC Rate Statement":                       "BOC_RATE",
-    "BOC Monetary Policy Report":               "BOC_RATE",
-    "Employment Change":                        "CAD_EMPLOYMENT",
-    "Unemployment Rate":                        "CAD_EMPLOYMENT",
-    "GDP m/m":                                  "CAD_GDP",
-    "GDP q/q":                                  "CAD_GDP",
-
-    # ── NZD ───────────────────────────────────────────────────────────────────
-    "CPI q/q":                                  "NZD_CPI",   # deduped by country
-    "CPI y/y":                                  "NZD_CPI",
-    "Official Cash Rate":                       "RBNZ_RATE",
-    "RBNZ Rate Statement":                      "RBNZ_RATE",
-    "RBNZ Monetary Policy Statement":           "RBNZ_RATE",
-    "Employment Change q/q":                    "NZD_EMPLOYMENT",
-    "Unemployment Rate":                        "NZD_EMPLOYMENT",
-
-    # ── CHF ───────────────────────────────────────────────────────────────────
-    "CPI m/m":                                  "CHF_CPI",   # deduped by country
-    "CPI y/y":                                  "CHF_CPI",
-    "SNB Policy Rate":                          "SNB_RATE",
-    "SNB Monetary Policy Assessment":           "SNB_RATE",
-    "Unemployment Rate":                        "CHF_UNEMPLOYMENT",
 }
 
 # Titles that are shared across currencies and require country-code disambiguation.
 # Key: (ff_country_code_upper, ff_title_lower_fragment) → event_code
 _COUNTRY_DISAMBIG: dict[tuple[str, str], str] = {
-    # CPI / inflation
-    ("EUR", "cpi"):                 "EUR_CPI",
-    ("EUR", "hicp"):                "EUR_CPI",
-    ("EUR", "core cpi"):            "EUR_CORE_CPI",
-    ("GBP", "cpi"):                 "GBP_CPI",
-    ("GBP", "core cpi"):            "GBP_CORE_CPI",
-    ("JPY", "cpi"):                 "JPY_CPI",
-    ("AUD", "cpi"):                 "AUD_CPI",
-    ("AUD", "trimmed mean"):        "AUD_CPI",
-    ("CAD", "cpi"):                 "CAD_CPI",
-    ("NZD", "cpi"):                 "NZD_CPI",
-    ("CHF", "cpi"):                 "CHF_CPI",
-    # GDP
-    ("EUR", "gdp"):                 "EUR_GDP",
-    ("GBP", "gdp"):                 "GBP_GDP",
-    ("JPY", "gdp"):                 "JAPAN_GDP",
-    ("CAD", "gdp"):                 "CAD_GDP",
-    ("NZD", "gdp"):                 "NZD_CPI",   # NZD has no standalone GDP event code; map to closest
-    # Employment / unemployment
-    ("EUR", "unemployment"):        "EUR_UNEMPLOYMENT",
-    ("GBP", "employment"):          "GBP_EMPLOYMENT",
-    ("GBP", "claimant"):            "GBP_EMPLOYMENT",
-    ("GBP", "average earnings"):    "GBP_EMPLOYMENT",
-    ("AUD", "employment"):          "AUD_EMPLOYMENT",
-    ("AUD", "unemployment"):        "AUD_EMPLOYMENT",
-    ("CAD", "employment"):          "CAD_EMPLOYMENT",
-    ("CAD", "unemployment"):        "CAD_EMPLOYMENT",
-    ("NZD", "employment"):          "NZD_EMPLOYMENT",
-    ("NZD", "unemployment"):        "NZD_EMPLOYMENT",
-    ("CHF", "unemployment"):        "CHF_UNEMPLOYMENT",
-    # PMI — shared title but different currencies
-    ("EUR", "manufacturing pmi"):   "EUR_PMI_MFG",
-    ("EUR", "flash manufacturing"): "EUR_PMI_MFG",
-    ("EUR", "services pmi"):        "EUR_PMI_SERVICES",
-    ("EUR", "flash services"):      "EUR_PMI_SERVICES",
-    ("GBP", "manufacturing pmi"):   "GBP_PMI_MFG",
-    ("GBP", "services pmi"):        "GBP_PMI_SERVICES",
-    # Retail sales
-    ("GBP", "retail sales"):        "GBP_RETAIL_SALES",
-    ("AUD", "retail sales"):        "AUD_RETAIL_SALES",
     # Rate decisions — shared "unemployment rate" title
     ("USD", "unemployment rate"):   "UNEMPLOYMENT_RATE",
 }
@@ -295,13 +167,9 @@ def _resolve_event_code(country: str, title: str, impact: str) -> Optional[str]:
         if ff_name.lower() in title_lower:
             return code
 
-    # Step 3 — fallback for mapped countries with high/medium impact
+    # Step 3 — fallback for USD with high/medium impact
     if impact in ("high", "medium"):
-        prefix = {
-            "EUR": "EUR_", "GBP": "GBP_", "JPY": "JPY_",
-            "AUD": "AUD_", "CHF": "CHF_", "CAD": "CAD_", "NZD": "NZD_",
-            "USD": "",
-        }.get(ccy, f"{ccy}_")
+        prefix = {"USD": ""}.get(ccy, f"{ccy}_")
         sanitised = re.sub(r"[^A-Z0-9]+", "_", title.upper()).strip("_")
         return f"{prefix}{sanitised}"
 
@@ -314,18 +182,11 @@ _SORTED_EVENT_MAP = sorted(FF_EVENT_MAP.items(), key=lambda x: len(x[0]), revers
 
 def fetch_calendar_events(force_refresh: bool = False) -> list[dict]:
     """
-    Pull this week's Forex Factory calendar for all 8 currencies,
-    both red (high) and orange (medium) impact events.
+    Pull this week's + next week's FF calendar for all 8 currencies,
+    red (high) + orange (medium) impact events.
 
-    Returns a list of event dicts:
-      event_code        — internal code (e.g. "NFP", "EUR_CPI")
-      event_name        — original FF title
-      currency          — 3-letter code
-      release_time_utc  — ISO-8601 string from FF feed
-      forecast          — float | None
-      previous          — float | None
-      actual            — float | None
-      impact            — "HIGH" | "MEDIUM"
+    On 429 / network failure, falls back to disk cache immediately.
+    Logs a diagnostic summary so empty results are never silent.
     """
     global _in_memory_cache
     now = time.time()
@@ -343,28 +204,10 @@ def fetch_calendar_events(force_refresh: bool = False) -> list[dict]:
         ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.forexfactory.com/",
     }
 
-    raw_events: list[dict] = []
-    try:
-        r = requests.get(FOREX_FACTORY_URL, headers=headers, timeout=12)
-        r.raise_for_status()
-        raw_events = r.json()
-    except Exception as e:
-        log.warning("Forex Factory fetch failed (%s) — using cached events.", e)
-        fallback = _in_memory_cache["events"] or _load_disk_cache()
-        if fallback:
-            _in_memory_cache = {"timestamp": now, "events": fallback}
-        return fallback
-
-    if not raw_events:
-        log.warning("Forex Factory returned empty list — using cached events.")
-        fallback = _load_disk_cache()
-        if fallback:
-            return fallback
-        return []
-
-    # Load disk cache once for actual-value preservation
+    # Load disk cache once — used for actual-value preservation + fallback
     disk_events = _load_disk_cache()
     _disk_actual_index: dict[str, float] = {}
     for d in disk_events:
@@ -372,26 +215,84 @@ def fetch_calendar_events(force_refresh: bool = False) -> list[dict]:
             key = f"{d.get('event_name','')}||{d.get('release_time_utc','')}"
             _disk_actual_index[key] = d["actual"]
 
-    results: list[dict] = []
+    # Try fetching both week URLs; stop on 429 (rate-limited)
+    raw_events: list[dict] = []
+    fetch_succeeded = False
+
+    for url in FF_URLS:
+        try:
+            r = requests.get(url, headers=headers, timeout=12)
+            if r.status_code == 429:
+                log.warning(
+                    "Forex Factory 429 on %s — using disk cache (%d events)",
+                    url, len(disk_events),
+                )
+                break
+            r.raise_for_status()
+            week_data = r.json()
+            label = "thisweek" if "thisweek" in url else "nextweek"
+            log.info("FF %s: %d raw events fetched", label, len(week_data))
+            raw_events.extend(week_data)
+            fetch_succeeded = True
+        except requests.exceptions.HTTPError as e:
+            code_val = e.response.status_code if e.response is not None else 0
+            if code_val == 429:
+                log.warning("Forex Factory 429 — falling back to disk cache")
+                break
+            log.warning("Forex Factory HTTP error %s: %s", url, e)
+        except Exception as e:
+            log.warning("Forex Factory fetch error %s: %s", url, e)
+
+    # Fall back to disk cache if live fetch failed or was rate-limited
+    if not fetch_succeeded or not raw_events:
+        fallback = disk_events or _in_memory_cache["events"]
+        if fallback:
+            log.info(
+                "Calendar using cache fallback: %d events "
+                "(FF unavailable or rate-limited)", len(fallback),
+            )
+            _in_memory_cache = {"timestamp": now, "events": fallback}
+            return fallback
+        log.error("Calendar: no FF data and no cache — returning empty list")
+        return []
+
+    # Deduplicate across weeks (same event can appear in both responses near week boundary)
+    seen_raw: set[str] = set()
+    deduped: list[dict] = []
     for ev in raw_events:
+        key = f"{ev.get('title','')}||{ev.get('date','')}"
+        if key not in seen_raw:
+            seen_raw.add(key)
+            deduped.append(ev)
+
+    log.info("FF raw events after dedup: %d (from %d)", len(deduped), len(raw_events))
+
+    # Filter and resolve
+    results: list[dict] = []
+    skipped_country = skipped_impact = skipped_no_code = 0
+
+    for ev in deduped:
         country = ev.get("country", "").upper()
         if country not in TRACKED_CURRENCIES:
+            skipped_country += 1
             continue
 
         impact_raw = ev.get("impact", "").lower()
         if impact_raw not in TRACKED_IMPACTS:
+            skipped_impact += 1
             continue
 
-        title = ev.get("title", "")
+        title      = ev.get("title", "")
         event_code = _resolve_event_code(country, title, impact_raw)
 
         if not event_code:
+            skipped_no_code += 1
+            log.debug("No mapping: [%s] %s %s", impact_raw, country, title)
             continue
 
-        # Preserve any already-known actual from disk cache
-        cache_key = f"{title}||{ev.get('date', '')}"
+        cache_key     = f"{title}||{ev.get('date', '')}"
         parsed_actual = _parse_num(ev.get("actual"))
-        actual_val = parsed_actual if parsed_actual is not None else _disk_actual_index.get(cache_key)
+        actual_val    = parsed_actual if parsed_actual is not None else _disk_actual_index.get(cache_key)
 
         results.append({
             "event_code":       event_code,
@@ -401,21 +302,31 @@ def fetch_calendar_events(force_refresh: bool = False) -> list[dict]:
             "forecast":         _parse_num(ev.get("forecast")),
             "previous":         _parse_num(ev.get("previous")),
             "actual":           actual_val,
-            "impact":           impact_raw.upper(),   # "HIGH" | "MEDIUM"
+            "impact":           impact_raw.upper(),
         })
+
+    # Diagnostic summary — always logged
+    ccy_counts = {}
+    for ev in results:
+        ccy_counts[ev["currency"]] = ccy_counts.get(ev["currency"], 0) + 1
+
+    log.info(
+        "Calendar: %d events kept | skipped: %d country / %d impact / %d no-mapping | "
+        "per-currency: %s",
+        len(results), skipped_country, skipped_impact, skipped_no_code, ccy_counts,
+    )
 
     if results:
         _in_memory_cache = {"timestamp": now, "events": results}
         _save_disk_cache(results)
-        log.info(
-            "Calendar updated: %d events (%d currencies, red+orange)",
-            len(results),
-            len({e["currency"] for e in results}),
-        )
     else:
-        # Parsing yielded nothing — fall back to disk cache silently
-        fallback = _load_disk_cache()
+        # Parsed successfully but 0 results survived filtering — use cache
+        fallback = disk_events or _in_memory_cache["events"]
         if fallback:
+            log.warning(
+                "Calendar parse yielded 0 results despite %d raw events — "
+                "using %d cached events", len(deduped), len(fallback),
+            )
             _in_memory_cache = {"timestamp": now, "events": fallback}
             return fallback
 
