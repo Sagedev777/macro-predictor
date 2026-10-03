@@ -4,7 +4,7 @@ scheduler.py — Background scheduler for pre-release alerts, post-release gradi
                48-hour sentiment refresh cycle.
 
 Schedule summary:
-  Every 5 min   — check_and_alert_upcoming()   (pre-release + post-release grading)
+  Every 1 min   — check_and_alert_upcoming()   (pre-release + post-release grading)
   Every 24 hr   — refresh_rate_differentials()  (yield spreads for all 8 currencies)
   Every 12 hr   — refresh_sentiment_cycle()     (GDELT + RSS + FinBERT for all 8)
   Every 168 hr  — refresh_cot_cycle()           (CFTC COT, released Fridays)
@@ -24,7 +24,7 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
-from alerts import BOT_TOKEN, CHAT_ID, send_telegram_alert
+from alerts import BOT_TOKEN, CHAT_ID, send_telegram_alert, send_post_release_alert
 from calendar_feed import fetch_upcoming_red_folder_events
 from config.events import CURRENCIES, get_event_config
 from database import (
@@ -161,13 +161,14 @@ def send_outcome_alert(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CORE SCHEDULER JOB — every 5 minutes
+# CORE SCHEDULER JOB — every 1 minute
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_and_alert_upcoming():
     """
-    Every 5 minutes:
-      1. Pre-release check — send Telegram alert if event within alert window.
+    Every 1 minute:
+      1. Pre-release check — send Telegram alert if event within 10-minute window.
+         Only fires for HIGH or MEDIUM impact events.
       2. Post-release grading — grade predictions when actuals appear.
       3. River learn_one() — called immediately after grading.
     """
@@ -185,10 +186,12 @@ def check_and_alert_upcoming():
     from sentiment import get_latest_cot, get_latest_sentiment, cot_to_score, sentiment_to_score
     from indicators import persist_currency_strength
 
+    # Keep reading ALERT_HOURS_BEFORE so /api/health still reports it correctly,
+    # but pre-release alerts now use a fixed 10-minute window instead.
     try:
         hours_before = float(os.getenv("ALERT_HOURS_BEFORE", "2"))
     except ValueError:
-        hours_before = 2.0
+        hours_before = 2.0  # noqa: F841 — read for health endpoint compatibility
 
     db = SessionLocal()
     try:
@@ -199,6 +202,11 @@ def check_and_alert_upcoming():
             code     = ev.get("event_code")
             currency = ev.get("currency", "USD")
             if not code:
+                continue
+
+            # ── Impact filter: only HIGH and MEDIUM events trigger alerts ────
+            impact = ev.get("impact", "")
+            if impact not in ("HIGH", "MEDIUM"):
                 continue
 
             rel_str = ev.get("release_time_utc")
@@ -212,10 +220,10 @@ def check_and_alert_upcoming():
             except Exception:
                 continue
 
-            hours_until = (event_utc - now_utc).total_seconds() / 3600.0
+            minutes_until = (event_utc - now_utc).total_seconds() / 60.0
 
-            # ── 1. PRE-RELEASE ALERT ──────────────────────────────────────────
-            if 0 < hours_until <= (hours_before + 0.5):
+            # ── 1. PRE-RELEASE ALERT — fires at 0–10 minutes before release ──
+            if 0 < minutes_until <= 10:
                 already_sent = db.query(AlertLog).filter(
                     AlertLog.event_code      == code,
                     AlertLog.release_time_str== rel_str,
@@ -224,8 +232,8 @@ def check_and_alert_upcoming():
 
                 if not already_sent:
                     log.info(
-                        "Pre-release alert for %s (%s) in %.1f hours.",
-                        code, currency, hours_until,
+                        "Pre-release alert for %s (%s) in %.1f minutes.",
+                        code, currency, minutes_until,
                     )
                     try:
                         pred_result = build_composite_score(code)
@@ -284,10 +292,13 @@ def check_and_alert_upcoming():
                             "INLINE"
                         )
                         pred_result["trade_signals"] = event_cfg.get("trade_signals", {}).get(_dir_key, [])
+                        # Pass forecast/previous through for the new template
+                        pred_result.setdefault("forecast", ev.get("forecast"))
+                        pred_result.setdefault("previous", ev.get("previous"))
 
                         send_telegram_alert(
                             pred_result,
-                            release_time=f"{event_utc.strftime('%H:%M')} UTC (in {int(hours_until * 60)}m)",
+                            release_time=f"{event_utc.strftime('%H:%M')} UTC (in {int(minutes_until)}m)",
                         )
                         db.add(AlertLog(
                             event_code       = code,
@@ -328,6 +339,9 @@ def check_and_alert_upcoming():
                     # ── River learn_one() — fires on ALL graded predictions ────
                     # is_pre_release_prediction only gates accuracy DISPLAY,
                     # not training — every real outcome is valid training data.
+                    new_confidence = recent_pred.confidence_pct or 50.0
+                    n_after        = 0
+                    n_before       = 0
                     try:
                         rd   = get_rate_differential(currency)
                         cot  = get_latest_cot(currency)
@@ -359,6 +373,7 @@ def check_and_alert_upcoming():
 
                         # Refresh currency strength snapshot after learning
                         pred_strength = predict_strength(currency, features)
+                        new_confidence = pred_strength.confidence_pct
                         persist_currency_strength(
                             currency        = currency,
                             strength_score  = pred_strength.strength_score,
@@ -378,7 +393,38 @@ def check_and_alert_upcoming():
                         AlertLog.alert_type       == "POST_RELEASE",
                     ).first()
                     if not post_sent:
-                        send_outcome_alert(code, actual, forecast, was_correct, lean, verdict_msg)
+                        # Compute monthly W/L for this currency
+                        try:
+                            from datetime import date
+                            _month_start = datetime(now_utc.year, now_utc.month, 1)
+                            _month_preds = (
+                                db.query(PredictionModel)
+                                .filter(
+                                    PredictionModel.currency    == currency,
+                                    PredictionModel.was_correct.isnot(None),
+                                    PredictionModel.is_sample.is_(False),
+                                    PredictionModel.created_at  >= _month_start,
+                                )
+                                .all()
+                            )
+                            wins_this_month   = sum(1 for p in _month_preds if p.was_correct is True)
+                            losses_this_month = sum(1 for p in _month_preds if p.was_correct is False)
+                        except Exception:
+                            wins_this_month   = 0
+                            losses_this_month = 0
+
+                        send_post_release_alert(
+                            pred              = recent_pred,
+                            actual            = actual,
+                            forecast          = forecast,
+                            n_trained_before  = n_before,
+                            n_trained_after   = n_after,
+                            wins_this_month   = wins_this_month,
+                            losses_this_month = losses_this_month,
+                            was_correct       = was_correct,
+                            new_confidence    = new_confidence,
+                            event_name        = ev.get("event_name", code),
+                        )
                         db.add(AlertLog(
                             event_code       = code,
                             release_time_str = rel_str,
@@ -554,11 +600,11 @@ def start_scheduler():
 
     scheduler = BackgroundScheduler(daemon=True)
 
-    # Every 5 minutes — pre/post release alerts + River learn_one()
+    # Every 1 minute — pre/post release alerts + River learn_one()
     scheduler.add_job(
         check_and_alert_upcoming,
         trigger="interval",
-        minutes=5,
+        minutes=1,
         id="auto_alert_job",
     )
 
@@ -600,7 +646,7 @@ def start_scheduler():
     _maybe_seed_models()
 
     log.info(
-        "Scheduler started: alert=5min | rate_diff=06:00 UTC | "
+        "Scheduler started: alert=1min | rate_diff=06:00 UTC | "
         "strengths=07:00 UTC | sentiment=00:30/12:30 UTC | cot=Fri 16:00 UTC"
     )
 

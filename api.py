@@ -125,8 +125,10 @@ def health():
 @app.get("/api/events")
 def get_upcoming_events(force_refresh: bool = False):
     """
-    Return upcoming red+orange folder events from Forex Factory with predictions.
-    Now covers all 8 currencies; impact field = "HIGH"|"MEDIUM".
+    Return upcoming red+orange folder events from Forex Factory.
+    Predictions are NOT computed inline here — they are attached lazily
+    only when already cached (TTL 10 min).  This keeps the response fast
+    even with 30+ multi-currency events in the feed.
     """
     events = fetch_upcoming_red_folder_events(force_refresh=force_refresh)
     return _get_events_body(events)
@@ -176,7 +178,7 @@ def sync_actuals_from_feed():
                 .order_by(PredictionModel.created_at.desc())
                 .first()
             )
-            if not pred or not is_pre_release_prediction(pred):
+            if not pred:
                 continue
 
             was_correct, verdict_msg = grade_prediction(
@@ -192,20 +194,38 @@ def sync_actuals_from_feed():
             db.commit()
 
             # ── River learn_one() after grading ───────────────────────────────
+            # Fires on every graded prediction — pre-release check only gates
+            # the accuracy ledger display, not the training loop.
             try:
+                from learning import _registry
+                n_before = _registry.get_n_trained(currency)
+                ind_score = float(pred.composite_score or 0.0)
+
                 rd   = get_rate_differential(currency)
                 cot  = get_latest_cot(currency)
                 sent = get_latest_sentiment(currency)
 
-                indicator_score = pred.composite_score or 0.0
                 features = build_features(
-                    indicator_score = float(indicator_score),
+                    indicator_score = ind_score,
                     rate_diff_score = rate_diff_to_score(rd),
                     cot_score       = cot_to_score(cot),
                     sentiment_score = sentiment_to_score(sent),
                 )
                 outcome = lean_to_outcome(pred.lean_direction, was_correct)
-                learn_one(currency, features, outcome)
+                stats   = learn_one(currency, features, outcome)
+
+                log.info(
+                    "learn_one [%s] event=%s outcome=%d correct=%s "
+                    "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
+                    "n_trained: %d → %d  acc=%.1f%%",
+                    currency, code, outcome, was_correct,
+                    ind_score,
+                    features.get("rate_diff_score", 0),
+                    features.get("cot_score", 0),
+                    features.get("sentiment_score", 0),
+                    n_before, stats.get("n_trained", 0),
+                    (stats.get("live_accuracy") or 0) * 100,
+                )
             except Exception as le:
                 log.warning("River learn_one failed for %s: %s", code, le)
 
@@ -252,14 +272,22 @@ def sync_actuals_from_feed():
 
 def _get_events_body(events: list) -> dict:
     """
-    Annotate calendar events with simultaneous flags, predictions, and pair signals.
-    Used by /api/events and related endpoints.
+    Annotate calendar events with simultaneous flags and any ALREADY-CACHED
+    predictions.  Does NOT call build_composite_score() inline — that would
+    make a FRED API call per event and block the response for 30+ seconds
+    with a full multi-currency calendar.
+
+    Predictions are attached only when already present in _api_pred_cache
+    (populated by /api/prediction/{event_code} or the scheduler).
+    The frontend fetches predictions separately per event as needed.
     """
     time_groups: dict[str, list] = {}
     for ev in events:
         t_str = ev.get("release_time_utc")
         if t_str:
             time_groups.setdefault(t_str, []).append(ev)
+
+    now_ts = time.time()
 
     for ev in events:
         code  = ev.get("event_code")
@@ -279,37 +307,15 @@ def _get_events_body(events: list) -> dict:
             ev["display_name"] = cfg.get("display_name", ev.get("event_name", code))
             ev["currency"]     = ev.get("currency") or cfg.get("currency", "USD")
 
-            now_ts = time.time()
+            # Attach prediction only if already cached — never compute inline
             cached = _api_pred_cache.get(code)
             if cached and (now_ts - cached[0]) < _API_PRED_TTL:
                 ev["prediction"] = cached[1]
             else:
-                try:
-                    result    = build_composite_score(code)
-                    direction = result["lean_direction"]
-                    dir_key   = (
-                        "BULLISH" if direction in ("BEAT",  "BULLISH") else
-                        "BEARISH" if direction in ("MISS",  "BEARISH") else
-                        "INLINE"
-                    )
-                    pred_data = {
-                        "lean_direction":   direction,
-                        "confidence_pct":   result["confidence_pct"],
-                        "composite_score":  result["composite_score"],
-                        "indicator_score":  result.get("indicator_score", 0.0),
-                        "event_label":      cfg.get("event_labels",  {}).get(dir_key, direction),
-                        "explanation":      cfg.get("explanations",  {}).get(dir_key, ""),
-                        "trade_signals":    cfg.get("trade_signals", {}).get(dir_key, []),
-                        "indicators":       result["indicator_breakdown"],
-                        "pair_signals":     _get_pair_signals_for_event(code, ev.get("currency", "USD"), result),
-                        "order_suggestions":get_latest_suggestions(code),
-                    }
-                    _api_pred_cache[code] = (now_ts, pred_data)
-                    ev["prediction"] = pred_data
-                except Exception as e:
-                    log.warning("Prediction failed for %s: %s", code, e)
-                    ev["prediction"] = None
+                ev["prediction"] = None   # frontend requests on-demand
 
+    log.info("_get_events_body: returning %d events (%d with cached predictions)",
+             len(events), sum(1 for e in events if e.get("prediction")))
     return {"count": len(events), "events": events}
 
 
@@ -456,19 +462,35 @@ def record_actual_api(payload: RecordActualPayload):
         pred.was_correct = was_correct
         db.commit()
 
-        # River learn_one
+        # River learn_one — fires regardless of pre-release status
         try:
+            from learning import _registry
+            n_before = _registry.get_n_trained(currency)
+            ind_score = float(pred.composite_score or 0.0)
+
             rd   = get_rate_differential(currency)
             cot  = get_latest_cot(currency)
             sent = get_latest_sentiment(currency)
             features = build_features(
-                indicator_score = float(pred.composite_score or 0.0),
+                indicator_score = ind_score,
                 rate_diff_score = rate_diff_to_score(rd),
                 cot_score       = cot_to_score(cot),
                 sentiment_score = sentiment_to_score(sent),
             )
             outcome = lean_to_outcome(pred.lean_direction, was_correct)
-            learn_one(currency, features, outcome)
+            stats   = learn_one(currency, features, outcome)
+            log.info(
+                "learn_one [%s] event=%s outcome=%d correct=%s "
+                "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
+                "n_trained: %d → %d  acc=%.1f%%",
+                currency, code, outcome, was_correct,
+                ind_score,
+                features.get("rate_diff_score", 0),
+                features.get("cot_score", 0),
+                features.get("sentiment_score", 0),
+                n_before, stats.get("n_trained", 0),
+                (stats.get("live_accuracy") or 0) * 100,
+            )
         except Exception as le:
             log.warning("River learn_one failed for %s: %s", code, le)
 
@@ -836,25 +858,24 @@ def get_overall_accuracy():
 def get_currency_strengths():
     """
     Return the latest strength score for all 8 currencies.
-    Scores are in [-1, +1] — positive = bullish, negative = bearish.
+    Reads directly from the currency_strengths DB table (populated by
+    run-full-cycle / scheduler), so it always reflects the last computed values.
     """
-    strengths   = _get_cached_strengths()
     db_snapshot = get_latest_currency_strengths()
 
     result = []
     for ccy in CURRENCIES:
-        pred = strengths.get(ccy)
         snap = db_snapshot.get(ccy, {})
         result.append({
-            "currency":       ccy,
-            "strength_score": pred.strength_score   if pred else 0.0,
-            "confidence_pct": pred.confidence_pct   if pred else 30.0,
-            "n_trained":      pred.n_trained         if pred else 0,
-            "indicator_score":snap.get("indicator_score"),
-            "rate_diff_score":snap.get("rate_diff_score"),
-            "cot_score":      snap.get("cot_score"),
-            "sentiment_score":snap.get("sentiment_score"),
-            "recorded_at":    snap.get("recorded_at"),
+            "currency":        ccy,
+            "strength_score":  snap.get("strength_score") or 0.0,
+            "confidence_pct":  snap.get("confidence_pct") or 30.0,
+            "n_trained":       0,
+            "indicator_score": snap.get("indicator_score"),
+            "rate_diff_score": snap.get("rate_diff_score"),
+            "cot_score":       snap.get("cot_score"),
+            "sentiment_score": snap.get("sentiment_score"),
+            "recorded_at":     snap.get("recorded_at"),
         })
 
     return {"count": len(result), "currency_strengths": result}
@@ -908,8 +929,21 @@ def get_single_currency_strength(currency: str):
 
 @app.get("/api/pair-biases")
 def get_all_pair_biases():
-    """Return directional bias for all canonical pairs."""
-    strengths   = _get_cached_strengths()
+    """Return directional bias for all canonical pairs, built from DB currency strengths."""
+    db_snapshot = get_latest_currency_strengths()
+
+    # Build StrengthPrediction objects from DB values so compute_all_pair_biases works
+    from learning import StrengthPrediction
+    strengths: dict[str, StrengthPrediction] = {}
+    for ccy in CURRENCIES:
+        snap = db_snapshot.get(ccy, {})
+        strengths[ccy] = StrengthPrediction(
+            currency=ccy,
+            strength_score=snap.get("strength_score") or 0.0,
+            confidence_pct=snap.get("confidence_pct") or 30.0,
+            predicted_class=1 if (snap.get("strength_score") or 0.0) >= 0 else 0,
+        )
+
     pair_biases = compute_all_pair_biases(strengths)
 
     result = [
@@ -1035,54 +1069,368 @@ def get_feature_drift():
 # SCHEDULER / TELEGRAM  (original signatures unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
+@app.get("/api/model-status")
+def get_model_status():
+    """
+    Per-currency River model status.
+    Returns n_trained, live_accuracy, feature_weights, last_updated.
+    n_trained=10 means only seed samples — no real learn_one() calls yet.
+    n_trained>10 means the feedback loop has fired at least once.
+    """
+    from database import SessionLocal, RiverModelState
+    db = SessionLocal()
+    try:
+        rows = {r.currency: r for r in db.query(RiverModelState).all()}
+    finally:
+        db.close()
+
+    result = []
+    for ccy in CURRENCIES:
+        row = rows.get(ccy)
+        import json as _json
+        fw = {}
+        if row and row.feature_weights:
+            try: fw = _json.loads(row.feature_weights)
+            except Exception: pass
+        result.append({
+            "currency":        ccy,
+            "n_trained":       row.n_trained      if row else 0,
+            "n_real":          max(0, (row.n_trained or 0) - 10) if row else 0,  # subtract 10 seed samples
+            "live_accuracy":   row.live_accuracy  if row else None,
+            "feature_weights": fw,
+            "last_updated":    row.updated_at.isoformat() if row and row.updated_at else None,
+            "status":          ("learning" if row and (row.n_trained or 0) > 10
+                                else "seeded_only" if row and (row.n_trained or 0) == 10
+                                else "untrained"),
+        })
+    return {"currencies": result}
+
+
+@app.get("/api/accuracy-trend")
+def get_accuracy_trend():
+    """
+    Rolling accuracy over windows of 10 predictions per currency.
+    Shows whether hit-rate is improving as n_trained grows.
+    Returns windows oldest → newest so the frontend can plot a trend line.
+    """
+    db = SessionLocal()
+    try:
+        all_graded = (
+            db.query(PredictionModel)
+            .filter(
+                PredictionModel.was_correct.isnot(None),
+                PredictionModel.is_sample.is_(False),
+            )
+            .order_by(PredictionModel.created_at.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+    # Group by currency
+    by_ccy: dict[str, list] = {}
+    for p in all_graded:
+        ccy = (p.currency or "USD").upper()
+        by_ccy.setdefault(ccy, []).append(p)
+
+    # Also compute an "all" aggregate
+    by_ccy["ALL"] = all_graded
+
+    trend_data = []
+    WINDOW = 10
+
+    for ccy, preds in by_ccy.items():
+        windows = []
+        for i in range(0, len(preds), WINDOW):
+            chunk = preds[i: i + WINDOW]
+            if len(chunk) < 2:
+                break
+            wins     = sum(1 for p in chunk if p.was_correct)
+            hit_rate = round(wins / len(chunk) * 100, 1)
+            windows.append({
+                "window_start": i + 1,
+                "window_end":   i + len(chunk),
+                "predictions":  len(chunk),
+                "wins":         wins,
+                "hit_rate_pct": hit_rate,
+                "date_from":    chunk[0].created_at.isoformat() if chunk[0].created_at else None,
+                "date_to":      chunk[-1].created_at.isoformat() if chunk[-1].created_at else None,
+            })
+        trend_data.append({
+            "currency":       ccy,
+            "total_graded":   len(preds),
+            "windows":        windows,
+            "improving":      (len(windows) >= 2 and
+                               windows[-1]["hit_rate_pct"] > windows[0]["hit_rate_pct"]),
+        })
+
+    return {"trend": trend_data}
+
+
+@app.get("/api/calibration")
+def get_calibration(currency: Optional[str] = None):
+    """
+    Calibration check: for each confidence bucket, compare stated confidence
+    (midpoint) against the actual real-world win rate of predictions in that bucket.
+
+    GET /api/calibration?currency=USD  (currency param is optional)
+
+    Response format:
+      [
+        {"bucket": "<60%",   "stated_midpoint": 55, "actual_win_rate": 0.48, "count": 12, "flagged": true},
+        {"bucket": "60-70%", "stated_midpoint": 65, "actual_win_rate": 0.63, "count": 8,  "flagged": false},
+        ...
+      ]
+    flagged = True when |actual_win_rate - stated_midpoint/100| > 0.10
+    Only buckets with count > 0 are returned.
+    """
+    db = SessionLocal()
+    try:
+        query = db.query(PredictionModel).filter(
+            PredictionModel.was_correct.isnot(None),
+            PredictionModel.is_sample.is_(False),
+        )
+        if currency:
+            query = query.filter(PredictionModel.currency == currency.upper())
+        preds = query.all()
+    finally:
+        db.close()
+
+    buckets = [
+        {"bucket": "<60%",   "stated_midpoint": 55, "total": 0, "wins": 0},
+        {"bucket": "60-70%", "stated_midpoint": 65, "total": 0, "wins": 0},
+        {"bucket": "70-80%", "stated_midpoint": 75, "total": 0, "wins": 0},
+        {"bucket": ">80%",   "stated_midpoint": 85, "total": 0, "wins": 0},
+    ]
+
+    for p in preds:
+        conf = p.confidence_pct or 0.0
+        if conf < 60:
+            idx = 0
+        elif conf < 70:
+            idx = 1
+        elif conf < 80:
+            idx = 2
+        else:
+            idx = 3
+        buckets[idx]["total"] += 1
+        if p.was_correct:
+            buckets[idx]["wins"] += 1
+
+    result = []
+    for b in buckets:
+        total = b["total"]
+        if total == 0:
+            continue
+        wins             = b["wins"]
+        actual_win_rate  = wins / total
+        stated_midpoint  = b["stated_midpoint"]
+        flagged          = abs(actual_win_rate - stated_midpoint / 100) > 0.10
+        result.append({
+            "bucket":          b["bucket"],
+            "stated_midpoint": stated_midpoint,
+            "actual_win_rate": round(actual_win_rate, 4),
+            "count":           total,
+            "flagged":         flagged,
+        })
+
+    return result
+
+
 @app.post("/api/scheduler/check-now")
 def trigger_scheduler_check():
     check_and_alert_upcoming()
     return {"status": "ok", "message": "Alert check triggered successfully"}
 
 
+@app.post("/api/predictions/warmup")
+def warmup_predictions(background_tasks=None):
+    """
+    Generate predictions for all HIGH-impact upcoming events that don't have
+    a cached prediction yet.  Called automatically by the frontend on first load.
+    Runs synchronously but is fast because it only processes events with no
+    existing cached prediction — typically 3-8 events on a fresh start.
+    Returns immediately with the list of event codes that were processed.
+    """
+    import threading
+
+    events = fetch_upcoming_red_folder_events()
+    high_events = [
+        e for e in events
+        if e.get("impact") == "HIGH" and e.get("event_code")
+    ]
+
+    now_ts = time.time()
+    to_run = [
+        e for e in high_events
+        if not (_api_pred_cache.get(e["event_code"]) and
+                (now_ts - _api_pred_cache[e["event_code"]][0]) < _API_PRED_TTL)
+    ]
+
+    triggered: list[str] = [e["event_code"] for e in to_run]
+
+    def _run_predictions():
+        for ev in to_run:
+            code = ev["event_code"]
+            try:
+                cfg      = get_event_config(code)
+                currency = ev.get("currency") or cfg.get("currency", "USD")
+                result   = build_composite_score(code)
+                direction = result["lean_direction"]
+                dir_key   = (
+                    "BULLISH" if direction in ("BEAT", "BULLISH") else
+                    "BEARISH" if direction in ("MISS", "BEARISH") else
+                    "INLINE"
+                )
+                pair_signals = _get_pair_signals_for_event(code, currency, result)
+                pred_data = {
+                    "lean_direction":    direction,
+                    "confidence_pct":    result["confidence_pct"],
+                    "composite_score":   result["composite_score"],
+                    "indicator_score":   result.get("indicator_score", 0.0),
+                    "event_label":       cfg.get("event_labels",  {}).get(dir_key, direction),
+                    "explanation":       cfg.get("explanations",  {}).get(dir_key, ""),
+                    "trade_signals":     cfg.get("trade_signals", {}).get(dir_key, []),
+                    "indicators":        result["indicator_breakdown"],
+                    "pair_signals":      pair_signals,
+                    "order_suggestions": get_latest_suggestions(code),
+                }
+                _api_pred_cache[code] = (time.time(), pred_data)
+
+                # Persist to DB
+                db = SessionLocal()
+                try:
+                    release_time_utc = ev.get("release_time_utc")
+                    existing = db.query(PredictionModel).filter(
+                        PredictionModel.event_code == code,
+                        PredictionModel.release_time_utc == release_time_utc,
+                    ).first()
+                    if not existing:
+                        db.add(PredictionModel(
+                            event_code          = code,
+                            event_display_name  = cfg.get("display_name", code),
+                            release_time_utc    = release_time_utc,
+                            forecast            = ev.get("forecast"),
+                            composite_score     = result["composite_score"],
+                            lean_direction      = result["lean_direction"],
+                            confidence_pct      = result["confidence_pct"],
+                            indicator_breakdown = json.dumps(result["indicator_breakdown"]),
+                            currency            = currency,
+                            pair_signals        = json.dumps(pair_signals),
+                            model_version       = "river_arf_v1",
+                        ))
+                        db.commit()
+                finally:
+                    db.close()
+
+                log.info("Warmup prediction: %s → %s (%.0f%%)", code, direction, result["confidence_pct"])
+            except Exception as e:
+                log.warning("Warmup failed for %s: %s", code, e)
+
+    # Run in background thread so the response returns immediately
+    t = threading.Thread(target=_run_predictions, daemon=True)
+    t.start()
+
+    to_run_codes = [e["event_code"] for e in to_run]
+    return {
+        "status":    "started",
+        "triggered": to_run_codes,
+        "skipped":   [e["event_code"] for e in high_events if e["event_code"] not in to_run_codes],
+    }
+
+
 @app.post("/api/run-full-cycle")
 def run_full_cycle():
     """
     Trigger a full indicator + rate-differential + currency-strength cycle.
-    Useful for manual refresh without waiting for the scheduler.
+    Runs in a background thread and returns immediately so the request never times out.
+    The frontend polls /api/currency-strengths after a delay to pick up results.
     """
+    import threading
     from data_sources import compute_rate_differentials, rate_diff_to_score
     from sentiment import get_latest_cot, get_latest_sentiment, cot_to_score, sentiment_to_score
     from indicators import get_indicator_scores_all_currencies
 
-    try:
-        rate_diffs      = compute_rate_differentials()
-        indicator_scores= get_indicator_scores_all_currencies()
+    def _run():
+        try:
+            # Rate differentials — fast, hits FRED/ECB for yield data only
+            rate_diffs = compute_rate_differentials()
 
-        for ccy in CURRENCIES:
-            rd   = rate_diffs.get(ccy)
-            cot  = get_latest_cot(ccy)
-            sent = get_latest_sentiment(ccy)
+            # Instead of pulling all indicators for all 8 currencies (200+ API calls),
+            # use the indicator scores that were already computed during warmup predictions.
+            # These are stored in the Prediction table as composite_score.
+            from database import SessionLocal, Prediction as PM
+            db_local = SessionLocal()
+            try:
+                recent_preds = (
+                    db_local.query(PM)
+                    .filter(PM.composite_score.isnot(None))
+                    .order_by(PM.created_at.desc())
+                    .limit(100)
+                    .all()
+                )
+                # Aggregate per-currency: average composite_score across recent predictions
+                ccy_scores: dict[str, list[float]] = {}
+                for p in recent_preds:
+                    ccy = (p.currency or "USD").upper()
+                    if p.composite_score is not None:
+                        ccy_scores.setdefault(ccy, []).append(float(p.composite_score))
+                indicator_scores = {
+                    ccy: sum(scores) / len(scores)
+                    for ccy, scores in ccy_scores.items()
+                }
+            finally:
+                db_local.close()
 
-            ind_score = indicator_scores.get(ccy, 0.0)
-            rd_score  = rate_diff_to_score(rd)
-            c_score   = cot_to_score(cot)
-            s_score   = sentiment_to_score(sent)
+            for ccy in CURRENCIES:
+                rd   = rate_diffs.get(ccy)
+                cot  = get_latest_cot(ccy)
+                sent = get_latest_sentiment(ccy)
 
-            features = build_features(ind_score, rd_score, c_score, s_score)
-            pred     = predict_strength(ccy, features)
+                ind_score = indicator_scores.get(ccy, 0.0)
+                rd_score  = rate_diff_to_score(rd)
+                c_score   = cot_to_score(cot)
+                s_score   = sentiment_to_score(sent)
 
-            persist_currency_strength(
-                currency=ccy,
-                strength_score=pred.strength_score,
-                indicator_score=ind_score,
-                rate_diff_score=rd_score,
-                cot_score=c_score,
-                sentiment_score=s_score,
-                confidence_pct=pred.confidence_pct,
-            )
+                # Use direct weighted composite — River takes over after 20+ real samples
+                from database import load_river_model as _lrm
+                _, n_trained, _, _ = _lrm(ccy)
+                if (n_trained or 0) < 20:
+                    weights = [0.50, 0.25, 0.15, 0.10]
+                    scores  = [ind_score, rd_score, c_score, s_score]
+                    composite = sum(w * s for w, s in zip(weights, scores))
+                    strength_score = round(max(-1.0, min(1.0, composite)), 4)
+                    confidence_pct = 40.0 + abs(strength_score) * 25.0
+                else:
+                    features = build_features(ind_score, rd_score, c_score, s_score)
+                    river_pred = predict_strength(ccy, features)
+                    strength_score = river_pred.strength_score
+                    confidence_pct = river_pred.confidence_pct
 
-        _strength_cache.clear()   # bust cache so next request gets fresh data
-        return {"status": "ok", "message": "Full prediction cycle complete.", "currencies": CURRENCIES}
-    except Exception as e:
-        log.error("Full cycle failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+                persist_currency_strength(
+                    currency=ccy,
+                    strength_score=strength_score,
+                    indicator_score=ind_score,
+                    rate_diff_score=rd_score,
+                    cot_score=c_score,
+                    sentiment_score=s_score,
+                    confidence_pct=confidence_pct,
+                )
+                log.info(
+                    "Strength [%s]: score=%.3f conf=%.0f%% "
+                    "(ind=%.3f rd=%.3f cot=%.3f sent=%.3f n=%s)",
+                    ccy, strength_score, confidence_pct,
+                    ind_score, rd_score, c_score, s_score, n_trained,
+                )
+
+            _strength_cache.clear()
+            log.info("run-full-cycle complete for %d currencies", len(CURRENCIES))
+        except Exception as e:
+            log.error("Full cycle failed: %s", e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return {"status": "started", "message": "Strength cycle running in background.", "currencies": CURRENCIES}
 
 
 @app.post("/api/prediction/{event_code}/telegram")
