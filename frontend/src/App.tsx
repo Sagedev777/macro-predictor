@@ -3,66 +3,62 @@ import axios from 'axios'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 const API = '/api'
-const LS_CCY   = 'mp_ccy_filter'
-const LS_PAIRS = 'mp_pair_filter'
+const LS_KEY = 'macro_currency_filter'
+const ALL_CCYS = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CHF', 'CAD', 'NZD']
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+type Page = 'home' | 'calendar' | 'model' | 'track'
+
 interface CalEvent {
   event_code: string | null
   event_name: string
+  display_name?: string
   currency: string
   release_time_utc: string
   forecast: number | null
   previous: number | null
   actual: number | null
   impact: 'HIGH' | 'MEDIUM'
-  display_name?: string
   is_simultaneous: boolean
   prediction?: PredSummary | null
 }
+
 interface PredSummary {
   lean_direction: string
   event_label: string
   confidence_pct: number
   composite_score: number
+  trade_signals: string[]
   pair_signals: PairSignal[]
-  order_suggestions: OrderSug[]
-  indicators: Indicator[]
+  order_suggestions?: OrderSug[]
+  indicators?: Indicator[]
 }
+
 interface PairSignal { pair: string; direction: string; bias: number; confidence_pct: number }
+
 interface OrderSug {
-  pair: string; bias: string; current_price: number | null; atr_14: number | null
+  pair: string; bias: string; current_price: number | null
   suggested_entry: number | null; suggested_sl: number | null; suggested_tp: number | null
   confidence_pct: number
 }
+
 interface Indicator { description: string; z_score: number | null; signal: number; weight: number }
 
-interface StoredPred {
-  id: number; event_code: string; display_name: string; currency: string
-  lean_direction: string; event_label: string; confidence_pct: number; composite_score: number
-  pair_signals: PairSignal[]; order_suggestions: OrderSug[]; indicators: Indicator[]
-  trade_signals: string[]
-  created_at: string; was_correct: boolean | null; forecast: number | null; actual: number | null
-}
 
-interface CcyStrength {
-  currency: string; strength_score: number; confidence_pct: number; n_trained: number
-  indicator_score: number | null; rate_diff_score: number | null
-  cot_score: number | null; sentiment_score: number | null; recorded_at: string | null
-}
-interface PairBias {
-  pair: string; bias: number; direction: string; confidence_pct: number
-  base_strength: number; quote_strength: number
-}
 interface ModelStatus {
   currency: string; n_trained: number; n_real: number
-  live_accuracy: number | null; feature_weights: Record<string, number>
-  last_updated: string | null; status: 'learning' | 'seeded_only' | 'untrained'
+  live_accuracy: number | null
+  feature_weights: Record<string, number>
+  last_updated: string | null
+  status: 'learning' | 'seeded_only' | 'untrained'
 }
+
 interface AccTrendWindow {
   window_start: number; window_end: number; predictions: number
   wins: number; hit_rate_pct: number; date_from: string | null; date_to: string | null
 }
+
 interface AccTrendCcy {
   currency: string; total_graded: number; windows: AccTrendWindow[]; improving: boolean
 }
@@ -72,745 +68,1010 @@ interface HistItem {
   lean_direction: string; confidence_pct: number; forecast: number | null
   actual: number | null; surprise: number | null; was_correct: boolean; date: string | null
 }
+
 interface AccStats {
   total_predictions: number; wins: number; losses: number; overall_hit_rate: number
   confidence_stats: { bucket: string; total: number; wins: number; hit_rate_pct: number }[]
 }
 
-type Tab = 'calendar' | 'signals' | 'strength' | 'results'
-
-// ── Statics ───────────────────────────────────────────────────────────────────
-const FLAG: Record<string,string> = {
-  USD:'🇺🇸',EUR:'🇪🇺',GBP:'🇬🇧',JPY:'🇯🇵',AUD:'🇦🇺',CHF:'🇨🇭',CAD:'🇨🇦',NZD:'🇳🇿',
-}
-const ALL_CCYS  = ['USD','EUR','GBP','JPY','AUD','CHF','CAD','NZD']
-const ALL_PAIRS = [
-  // USD majors
-  'EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','USDCAD','NZDUSD','XAUUSD',
-  // EUR crosses
-  'EURGBP','EURJPY','EURCHF','EURAUD','EURCAD','EURNZD',
-  // GBP crosses
-  'GBPJPY','GBPCHF','GBPAUD','GBPCAD','GBPNZD',
-  // JPY crosses
-  'AUDJPY','CADJPY','CHFJPY','NZDJPY',
-  // AUD crosses
-  'AUDCAD','AUDCHF','AUDNZD',
-  // CAD crosses
-  'CADCHF','NZDCAD',
-  // CHF/NZD
-  'NZDCHF',
-]
-const FW_LABELS: Record<string,string> = {
-  indicator_score:'Indicator',rate_diff_score:'Rate Diff',cot_score:'COT',sentiment_score:'Sentiment'
-}
-const FW_COLS = ['#6366f1','#06b6d4','#f59e0b','#10b981']
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function ls<T>(key:string, fb:T): T {
-  try { const v=localStorage.getItem(key); return v?JSON.parse(v):fb } catch { return fb }
-}
-function saveLs(key:string, val:unknown) { try { localStorage.setItem(key,JSON.stringify(val)) } catch {} }
 
-function cd(iso:string, now:number): string {
-  const ms = new Date(iso).getTime()-now
-  if (ms<=0) return 'Released'
-  const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sc=s%60
-  if (h>48) return `${Math.floor(h/24)}d ${h%24}h`
-  if (h>0)  return `${h}h ${m}m`
-  if (m>0)  return `${m}m ${sc}s`
+const FLAG: Record<string, string> = {
+  USD: '🇺🇸', EUR: '🇪🇺', GBP: '🇬🇧', JPY: '🇯🇵',
+  AUD: '🇦🇺', CHF: '🇨🇭', CAD: '🇨🇦', NZD: '🇳🇿',
+}
+
+const FW_LABELS: Record<string, string> = {
+  indicator_score: 'Indicator',
+  rate_diff_score: 'Rate Diff',
+  cot_score: 'COT',
+  sentiment_score: 'Sentiment',
+}
+const FW_KEYS = ['indicator_score', 'rate_diff_score', 'cot_score', 'sentiment_score']
+const FW_COLORS = ['#6366f1', '#06b6d4', '#f59e0b', '#10b981']
+
+function formatCountdown(isoUtc: string, now: number): string {
+  const ms = new Date(isoUtc).getTime() - now
+  if (ms <= 0) return 'Released'
+  const s = Math.floor(ms / 1000)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sc = s % 60
+  if (h > 48) return `${Math.floor(h / 24)}d ${h % 24}h`
+  if (h > 0) return `${h}h ${m}m ${sc}s`
+  if (m > 0) return `${m}m ${sc}s`
   return `${sc}s`
 }
-function utcT(iso:string) {
-  try { return new Date(iso).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' UTC' }
-  catch { return iso }
+
+function formatTime(isoUtc: string): string {
+  try {
+    return new Date(isoUtc).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC'
+  } catch { return isoUtc }
 }
-function fmtD(iso:string) {
-  try { return new Date(iso).toLocaleDateString('en-GB',{weekday:'short',month:'short',day:'numeric',timeZone:'UTC'}) }
-  catch { return '' }
+
+function formatDate(isoUtc: string): string {
+  try {
+    return new Date(isoUtc).toLocaleDateString('en-GB', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+  } catch { return '' }
 }
-function fN(n:number|null,dp=3){ return n==null?'—':n.toFixed(dp) }
-function dc(d:string): 'bull'|'bear'|'flat' {
-  const u=d?.toUpperCase()
-  if(u==='BEAT'||u==='BULLISH'||u==='BUY') return 'bull'
-  if(u==='MISS'||u==='BEARISH'||u==='SELL') return 'bear'
+
+function groupDateLabel(isoUtc: string): string {
+  const d = new Date(isoUtc)
+  const today = new Date()
+  const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
+  const eventUTC = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+  const diff = (eventUTC - todayUTC) / 86400000
+  if (diff === 0) return 'Today'
+  if (diff === 1) return 'Tomorrow'
+  return formatDate(isoUtc)
+}
+
+function directionClass(d: string): 'bull' | 'bear' | 'flat' {
+  const u = d?.toUpperCase()
+  if (u === 'BEAT' || u === 'BULLISH' || u === 'BUY') return 'bull'
+  if (u === 'MISS' || u === 'BEARISH' || u === 'SELL') return 'bear'
   return 'flat'
 }
-function dl(d:string) {
-  const u=d?.toUpperCase()
-  if(u==='BEAT'||u==='BULLISH') return 'BULLISH'
-  if(u==='MISS'||u==='BEARISH') return 'BEARISH'
+
+function directionLabel(d: string): string {
+  const u = d?.toUpperCase()
+  if (u === 'BEAT' || u === 'BULLISH') return 'BULLISH'
+  if (u === 'MISS' || u === 'BEARISH') return 'BEARISH'
   return 'INLINE'
 }
 
-// ── Micro-components ──────────────────────────────────────────────────────────
-function Bar({pct,cls}:{pct:number;cls?:string}) {
-  const a=pct>=70?'bar-bull':pct>=55?'bar-amb':'bar-flat'
-  return <div className="bar-t"><div className={`bar-f ${cls??a}`} style={{width:`${Math.min(pct,100)}%`}}/></div>
+function directionEmoji(d: string, ccy: string): string {
+  const u = d?.toUpperCase()
+  if (u === 'BEAT' || u === 'BULLISH') return `🟢 BUY ${ccy}`
+  if (u === 'MISS' || u === 'BEARISH') return `🔴 SELL ${ccy}`
+  return `🟡 HOLD ${ccy}`
 }
-function Dot({impact}:{impact:string}) {
-  return <span className={`dot ${impact==='HIGH'?'dot-h':'dot-m'}`}/>
+
+function confBarClass(pct: number): string {
+  if (pct >= 70) return 'hi'
+  if (pct >= 50) return 'mid'
+  return 'lo'
 }
-function DTag({d}:{d:string}) {
-  return <span className={`tag tag-${dc(d)}`}>{dl(d)}</span>
+
+function formatPairSignal(raw: string): { dir: string; pair: string } {
+  const parts = raw.trim().split(' ')
+  const dir = parts[0] ?? ''
+  const sym = (parts[1] ?? '').toUpperCase()
+  const fmtSym = sym.includes('/')
+    ? sym
+    : sym.length === 6
+      ? `${sym.slice(0, 3)}/${sym.slice(3)}`
+      : sym
+  return { dir, pair: fmtSym }
 }
-// ── Filter chip rows ──────────────────────────────────────────────────────────
-function CcyFilter({sel,toggle}:{sel:string[];toggle:(c:string)=>void}) {
-  const allOn = sel.length===ALL_CCYS.length
+
+function buildPairsFromPred(pred: PredSummary): { dir: string; pair: string }[] {
+  const signals = pred.trade_signals ?? []
+  if (signals.length > 0) {
+    return signals
+      .filter(s => s && !s.toUpperCase().startsWith('WAIT') && !s.toUpperCase().startsWith('HOLD'))
+      .map(formatPairSignal)
+      .filter(p => p.dir && p.pair)
+  }
+  // Fallback: top pair_signals
+  return (pred.pair_signals ?? [])
+    .slice(0, 7)
+    .map(ps => ({ dir: ps.direction.toUpperCase().includes('BUY') || ps.direction.toUpperCase() === 'BULLISH' ? 'BUY' : 'SELL', pair: ps.pair }))
+}
+
+function ls<T>(key: string, fallback: T): T {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback } catch { return fallback }
+}
+function saveLs(key: string, val: unknown) {
+  try { localStorage.setItem(key, JSON.stringify(val)) } catch { /* noop */ }
+}
+
+function fmtNum(n: number | null, dp = 3): string {
+  return n == null ? '—' : n.toFixed(dp)
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function Spinner() {
+  return <div className="spinner" role="status" aria-label="Loading" />
+}
+
+function CurrencyFilter({ sel, toggle }: { sel: string[]; toggle: (c: string) => void }) {
   return (
-    <div className="filter-row">
-      <button className={`fchip${allOn?' fchip-on':''}`}
-        onClick={()=>allOn?ALL_CCYS.forEach(c=>sel.includes(c)&&toggle(c)):ALL_CCYS.forEach(c=>!sel.includes(c)&&toggle(c))}>
-        All
-      </button>
-      {ALL_CCYS.map(c=>(
-        <button key={c} className={`fchip${sel.includes(c)?' fchip-on':''}`} onClick={()=>toggle(c)}>
+    <div className="ccy-filter" role="list" aria-label="Currency filter">
+      {ALL_CCYS.map(c => (
+        <button
+          key={c}
+          role="listitem"
+          className={`ccy-chip${sel.includes(c) ? ' on' : ''}`}
+          onClick={() => toggle(c)}
+          aria-pressed={sel.includes(c)}
+        >
           {FLAG[c]} {c}
         </button>
       ))}
     </div>
   )
 }
-function PairFilter({sel,toggle}:{sel:string[];toggle:(p:string)=>void}) {
-  const allOn = sel.length===ALL_PAIRS.length
+
+function ConfBar({ pct, cls }: { pct: number; cls?: string }) {
+  const barClass = cls ?? confBarClass(pct)
   return (
-    <div className="filter-row">
-      <button className={`fchip fchip-sm${allOn?' fchip-on':''}`}
-        onClick={()=>allOn?ALL_PAIRS.forEach(p=>sel.includes(p)&&toggle(p)):ALL_PAIRS.forEach(p=>!sel.includes(p)&&toggle(p))}>
-        All
-      </button>
-      {ALL_PAIRS.map(p=>(
-        <button key={p} className={`fchip fchip-sm${sel.includes(p)?' fchip-on':''}`} onClick={()=>toggle(p)}>
-          {p}
+    <div className="home-conf-bar-outer" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+      <div
+        className={`home-conf-bar-inner ${barClass}`}
+        style={{ width: `${Math.min(pct, 100)}%` }}
+      />
+    </div>
+  )
+}
+
+function CalConfBar({ pct, cls }: { pct: number; cls?: string }) {
+  const barClass = cls ?? confBarClass(pct)
+  return (
+    <div className="cal-conf-bar-outer" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+      <div
+        className={`cal-conf-bar-inner ${barClass}`}
+        style={{ width: `${Math.min(pct, 100)}%` }}
+      />
+    </div>
+  )
+}
+
+// ── Navigation components ─────────────────────────────────────────────────────
+
+const NAV_ITEMS: { page: Page; icon: string; label: string }[] = [
+  { page: 'home', icon: '🏠', label: 'Home' },
+  { page: 'calendar', icon: '📅', label: 'Calendar' },
+  { page: 'model', icon: '📈', label: 'Model' },
+  { page: 'track', icon: '📋', label: 'Records' },
+]
+
+function SideNav({ page, setPage }: { page: Page; setPage: (p: Page) => void }) {
+  return (
+    <nav className="side-rail" aria-label="Main navigation">
+      <div className="rail-logo">
+        <span className="rail-dot" />
+        MacroPredictor
+      </div>
+      <div className="rail-nav">
+        {NAV_ITEMS.map(item => (
+          <button
+            key={item.page}
+            className={`rail-item${page === item.page ? ' active' : ''}`}
+            onClick={() => setPage(item.page)}
+            aria-current={page === item.page ? 'page' : undefined}
+          >
+            <span className="rail-icon">{item.icon}</span>
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </nav>
+  )
+}
+
+function BottomNav({ page, setPage }: { page: Page; setPage: (p: Page) => void }) {
+  return (
+    <nav className="bottom-nav" aria-label="Main navigation">
+      {NAV_ITEMS.map(item => (
+        <button
+          key={item.page}
+          className={`bn-item${page === item.page ? ' active' : ''}`}
+          onClick={() => setPage(item.page)}
+          aria-current={page === item.page ? 'page' : undefined}
+        >
+          <span className="bn-icon">{item.icon}</span>
+          {item.label}
         </button>
+      ))}
+    </nav>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HOME PAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+function HomePage({ ccySel, now }: { ccySel: string[]; now: number }) {
+  const [events, setEvents] = useState<CalEvent[]>([])
+  const [loading, setLoading] = useState(true)
+  const warmupFired = useRef(false)
+
+  useEffect(() => {
+    setLoading(true)
+    axios.get(`${API}/events`)
+      .then(r => setEvents(r.data.events ?? []))
+      .catch(() => setEvents([]))
+      .finally(() => setLoading(false))
+  }, [])
+
+  // Fire warmup + full cycle once after events load
+  useEffect(() => {
+    if (events.length > 0 && !warmupFired.current) {
+      warmupFired.current = true
+      axios.post(`${API}/predictions/warmup`).catch(() => { /* fire and forget */ })
+      axios.post(`${API}/run-full-cycle`).catch(() => { /* fire and forget */ })
+      // Re-fetch events after warmup delay to pick up predictions
+      const timer = setTimeout(() => {
+        axios.get(`${API}/events`)
+          .then(r => setEvents(r.data.events ?? []))
+          .catch(() => { /* noop */ })
+      }, 15000)
+      return () => clearTimeout(timer)
+    }
+  }, [events.length])
+
+  // Find next upcoming event matching selected currencies
+  const nextEvent = useMemo(() => {
+    if (events.length === 0) return null
+    const nowMs = now
+    const upcoming = events
+      .filter(e => e.release_time_utc && e.actual === null)
+      .filter(e => ccySel.includes(e.currency))
+      .sort((a, b) => new Date(a.release_time_utc).getTime() - new Date(b.release_time_utc).getTime())
+
+    if (upcoming.length > 0) return upcoming[0]
+
+    // Fallback: nearest past within 1h
+    const recent = events
+      .filter(e => ccySel.includes(e.currency))
+      .filter(e => {
+        const ms = new Date(e.release_time_utc).getTime()
+        return nowMs - ms < 3600000 && nowMs - ms >= 0
+      })
+      .sort((a, b) => new Date(b.release_time_utc).getTime() - new Date(a.release_time_utc).getTime())
+
+    return recent[0] ?? null
+  }, [events, ccySel, now])
+
+  if (loading) {
+    return (
+      <div className="page">
+        <div className="loading-center"><Spinner /><span>Loading events…</span></div>
+      </div>
+    )
+  }
+
+  if (!nextEvent) {
+    return (
+      <div className="page">
+        <div className="home-no-event">
+          <span style={{ fontSize: 32 }}>📭</span>
+          <span>No events in the next 24h</span>
+          <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>Check back later or broaden your currency filter</span>
+        </div>
+      </div>
+    )
+  }
+
+  const pred = nextEvent.prediction
+  const released = nextEvent.actual !== null || new Date(nextEvent.release_time_utc).getTime() <= now
+  const countdown = formatCountdown(nextEvent.release_time_utc, now)
+  const eventName = nextEvent.display_name ?? nextEvent.event_name
+  const pairs = pred ? buildPairsFromPred(pred) : []
+
+  // Top suggested entry
+  const topEntry = pred?.order_suggestions?.find(s => s.suggested_entry != null)
+
+  return (
+    <div className="page">
+      <div className="home-card">
+        {/* Header */}
+        <div className="home-header">
+          <div className="home-event-name">{eventName}</div>
+          <div className="home-ccy-chip">
+            <span>{FLAG[nextEvent.currency] ?? ''}</span>
+            <span>{nextEvent.currency}</span>
+          </div>
+        </div>
+
+        {/* Forecast / Previous */}
+        <div className="home-meta">
+          {nextEvent.forecast != null && (
+            <div className="home-meta-item">
+              <span className="home-meta-label">Forecast</span>
+              <span className="home-meta-value">{nextEvent.forecast}</span>
+            </div>
+          )}
+          {nextEvent.previous != null && (
+            <div className="home-meta-item">
+              <span className="home-meta-label">Previous</span>
+              <span className="home-meta-value">{nextEvent.previous}</span>
+            </div>
+          )}
+          {nextEvent.actual != null && (
+            <div className="home-meta-item">
+              <span className="home-meta-label">Actual</span>
+              <span className="home-meta-value text-bull">{nextEvent.actual}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Countdown row */}
+        <div className="home-countdown-row">
+          <span className="home-countdown-label">Release</span>
+          <span className="home-countdown-time">{formatTime(nextEvent.release_time_utc)}</span>
+          <span className={`home-countdown-value${released ? ' released' : ''}`}>{countdown}</span>
+        </div>
+
+        {/* Direction + Confidence */}
+        {pred ? (
+          <div className="home-direction">
+            <div className={`home-dir-label ${directionClass(pred.lean_direction)}`}>
+              {directionEmoji(pred.lean_direction, nextEvent.currency)}
+            </div>
+            {pred.event_label && pred.event_label !== pred.lean_direction && (
+              <div className="home-dir-sub">{pred.event_label}</div>
+            )}
+            <div className="home-conf-wrap">
+              <ConfBar pct={pred.confidence_pct} />
+              <div className="home-conf-label">{pred.confidence_pct.toFixed(0)}% confidence</div>
+            </div>
+          </div>
+        ) : (
+          <div className="home-direction">
+            <div className="home-no-pred">
+              <Spinner />
+              <span>Prediction loading…</span>
+            </div>
+          </div>
+        )}
+
+        {/* Affected pairs */}
+        {pairs.length > 0 && (
+          <div className="home-pairs">
+            <div className="home-pairs-title">Affected majors</div>
+            <div className="home-pairs-list">
+              {pairs.map((p, i) => (
+                <div key={i} className={`home-pair-row ${p.dir.toUpperCase() === 'BUY' ? 'bull' : 'bear'}`}>
+                  <span className="home-pair-dir">{p.dir}</span>
+                  <span className="home-pair-name">{p.pair}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Suggested entry */}
+        <div className="home-entry">
+          <div className="home-entry-label">Suggested entry</div>
+          <div className="home-entry-value">
+            {topEntry?.suggested_entry != null
+              ? fmtNum(topEntry.suggested_entry, 5)
+              : '— await release'}
+          </div>
+        </div>
+        <div className="home-disclaimer">Reference only — not financial advice</div>
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CALENDAR PAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+function CalendarEventRow({ ev, now }: { ev: CalEvent; now: number }) {
+  const [open, setOpen] = useState(false)
+  const [showIndicators, setShowIndicators] = useState(false)
+  const pred = ev.prediction
+  const released = ev.actual !== null
+
+  const pairs = pred ? buildPairsFromPred(pred) : []
+  const indicators = pred?.indicators ?? []
+
+  return (
+    <div className="cal-row" onClick={() => setOpen(v => !v)} role="button" aria-expanded={open}>
+      <div className="cal-row-top">
+        <span className={`cal-impact-dot ${ev.impact === 'HIGH' ? 'high' : 'med'}`} aria-hidden="true" />
+        <span style={{ fontSize: 16 }}>{FLAG[ev.currency] ?? ''}</span>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', flexShrink: 0 }}>{ev.currency}</span>
+        <span className="cal-row-name">{ev.display_name ?? ev.event_name}</span>
+        <span className="cal-row-time">{formatTime(ev.release_time_utc)}</span>
+        {released
+          ? <span className="cal-row-released">Released</span>
+          : <span className="cal-row-cd">{formatCountdown(ev.release_time_utc, now)}</span>
+        }
+      </div>
+
+      <div className="cal-row-data" onClick={e => e.stopPropagation()}>
+        {ev.forecast != null && (
+          <div className="cal-data-item">
+            <span className="cal-data-label">Forecast</span>
+            <span className="cal-data-value">{ev.forecast}</span>
+          </div>
+        )}
+        {ev.previous != null && (
+          <div className="cal-data-item">
+            <span className="cal-data-label">Previous</span>
+            <span className="cal-data-value">{ev.previous}</span>
+          </div>
+        )}
+        {ev.actual != null && (
+          <div className="cal-data-item">
+            <span className="cal-data-label">Actual</span>
+            <span className="cal-data-value actual-val">{ev.actual}</span>
+          </div>
+        )}
+      </div>
+
+      {open && pred && (
+        <div className="cal-detail" onClick={e => e.stopPropagation()}>
+          <div className="cal-pred-label">Prediction</div>
+          <div className={`cal-dir ${directionClass(pred.lean_direction)}`}>
+            {directionEmoji(pred.lean_direction, ev.currency)}
+          </div>
+          <CalConfBar pct={pred.confidence_pct} />
+          <div className="cal-conf-label">{pred.confidence_pct.toFixed(0)}% confidence</div>
+
+          {pairs.length > 0 && (
+            <div className="cal-pairs-list">
+              {pairs.map((p, i) => (
+                <div key={i} className={`cal-pair-row ${p.dir.toUpperCase() === 'BUY' ? 'bull' : 'bear'}`}>
+                  <span style={{ fontSize: 11, opacity: 0.8, minWidth: 32 }}>{p.dir}</span>
+                  <span style={{ fontWeight: 700, fontSize: 14 }}>{p.pair}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {indicators.length > 0 && (
+            <>
+              <button
+                className="cal-indicators-toggle"
+                onClick={() => setShowIndicators(v => !v)}
+                aria-expanded={showIndicators}
+              >
+                {showIndicators ? 'Hide indicators ▲' : 'Show indicators ▼'}
+              </button>
+              {showIndicators && (
+                <div className="cal-indicators-list">
+                  {indicators.map((ind, i) => (
+                    <div key={i} className="cal-ind-row">
+                      <span className={`cal-ind-dot ${ind.signal > 0 ? 'bull' : ind.signal < 0 ? 'bear' : 'flat'}`}>
+                        {ind.signal > 0 ? '▲' : ind.signal < 0 ? '▼' : '●'}
+                      </span>
+                      <span className="cal-ind-desc">{ind.description}</span>
+                      <span className="cal-ind-z">{ind.z_score != null ? ind.z_score.toFixed(2) : '—'}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {open && !pred && (
+        <div className="cal-detail" onClick={e => e.stopPropagation()}>
+          <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>No prediction available</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CalendarPage({ ccySel, now }: { ccySel: string[]; now: number }) {
+  const [events, setEvents] = useState<CalEvent[]>([])
+  const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
+
+  const flash = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000) }
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try { const r = await axios.get(`${API}/events`); setEvents(r.data.events ?? []) }
+    catch { setEvents([]) }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const syncActuals = async () => {
+    setSyncing(true)
+    try {
+      const r = await axios.post(`${API}/events/sync-actuals`)
+      flash(`${r.data.newly_graded ?? 0} event(s) graded`)
+      load()
+    } catch { flash('Sync failed') }
+    finally { setSyncing(false) }
+  }
+
+  const filtered = useMemo(
+    () => events.filter(e => ccySel.includes(e.currency)),
+    [events, ccySel]
+  )
+
+  // Group by date label, preserving chronological order of groups
+  const groups = useMemo(() => {
+    const map = new Map<string, { label: string; ts: number; events: CalEvent[] }>()
+    for (const ev of filtered) {
+      const label = groupDateLabel(ev.release_time_utc)
+      const ts = new Date(ev.release_time_utc).getTime()
+      if (!map.has(label)) map.set(label, { label, ts, events: [] })
+      map.get(label)!.events.push(ev)
+    }
+    return [...map.values()].sort((a, b) => a.ts - b.ts)
+  }, [filtered])
+
+  return (
+    <div className="page">
+      {toast && <div className="toast">{toast}</div>}
+
+      <div className="cal-toolbar">
+        <button className="cal-sync-btn" onClick={syncActuals} disabled={syncing}>
+          {syncing ? <Spinner /> : '🔄'} Sync Actuals
+        </button>
+        <button className="cal-sync-btn" onClick={load} disabled={loading}>
+          {loading ? <Spinner /> : '↻'} Refresh
+        </button>
+      </div>
+
+      {loading && (
+        <div className="loading-center"><Spinner /><span>Loading calendar…</span></div>
+      )}
+
+      {!loading && filtered.length === 0 && (
+        <div className="empty-state">
+          <p>No events match selected currencies.</p>
+          <p className="sub">Toggle currencies in the filter bar above.</p>
+        </div>
+      )}
+
+      {!loading && groups.map(g => (
+        <div key={g.label} className="cal-group">
+          <div className="cal-group-header">{g.label}</div>
+          {g.events.map((ev, i) => (
+            <CalendarEventRow key={ev.event_code ?? `${ev.currency}-${i}`} ev={ev} now={now} />
+          ))}
+        </div>
       ))}
     </div>
   )
 }
 
-// ── Next-event banner ─────────────────────────────────────────────────────────
-function Banner({events,now}:{events:CalEvent[];now:number}) {
-  const sorted = [...events]
-    .filter(e=>e.release_time_utc)
-    .sort((a,b)=>new Date(a.release_time_utc).getTime()-new Date(b.release_time_utc).getTime())
-  const next = sorted.find(e=>e.actual==null)??sorted[sorted.length-1]
-  if(!next) return null
-  const ms=new Date(next.release_time_utc).getTime()-now
-  const released=ms<=0, imminent=!released&&ms<3600000
-  return (
-    <div className={`banner${imminent?' b-hot':released?' b-past':''}`}>
-      <div className="b-l">
-        <Dot impact={next.impact}/>
-        <span className="b-flag">{FLAG[next.currency]??''}</span>
-        <span className="b-name">{next.display_name??next.event_name}</span>
-        {next.forecast!=null&&<span className="b-fc">Forecast {fN(next.forecast,1)}</span>}
-        {next.prediction&&<DTag d={next.prediction.lean_direction}/>}
-      </div>
-      <div className="b-r">
-        <span className="b-time">{utcT(next.release_time_utc)}</span>
-        <span className={`b-cd${imminent?' b-cd-hot':released?' b-cd-past':''}`}>
-          {cd(next.release_time_utc,now)}
-        </span>
-      </div>
-    </div>
-  )
-}
-
-// ── Calendar card ─────────────────────────────────────────────────────────────
-function CalCard({ev,now,onPredict}:{ev:CalEvent;now:number;onPredict:(c:string)=>void}) {
-  const [open,setOpen]=useState(false)
-  const pred=ev.prediction, done=ev.actual!=null
-  const hasPairs=(pred?.pair_signals?.length??0)>0
-  const hasOrders=(pred?.order_suggestions?.filter(s=>s.suggested_entry).length??0)>0
-  return (
-    <div className={`cc${done?' cc-done':''}`}>
-      <div className="cc-top">
-        <div className="cc-tl">
-          <Dot impact={ev.impact}/>
-          <span className="cc-flag">{FLAG[ev.currency]??''}</span>
-          <span className="cc-ccy">{ev.currency}</span>
-          <span className="cc-name">{ev.display_name??ev.event_name}</span>
-        </div>
-        <div className="cc-tr">
-          <span className="cc-time">{utcT(ev.release_time_utc)}</span>
-          {!done&&<span className="cc-cd">{cd(ev.release_time_utc,now)}</span>}
-          {done&&<span className="cc-rel">Released</span>}
-        </div>
-      </div>
-      <div className="cc-data">
-        {(['Forecast','Previous','Actual'] as const).map((lbl,i)=>{
-          const val=[ev.forecast,ev.previous,ev.actual][i]
-          return (
-            <div key={lbl} className="cc-cell">
-              <span className="cc-lbl">{lbl}</span>
-              <span className={`cc-val${lbl==='Actual'&&val!=null?' cc-act':''}`}>
-                {val!=null?String(val):'—'}
-              </span>
-            </div>
-          )
-        })}
-      </div>
-      {pred?(
-        <div className={`pred-row pred-${dc(pred.lean_direction)}${hasPairs||hasOrders?' pred-click':''}`}
-          onClick={()=>(hasPairs||hasOrders)&&setOpen(v=>!v)}>
-          <span className="pred-lbl">{pred.event_label}</span>
-          <div className="pred-bar"><Bar pct={pred.confidence_pct} cls={`bar-${dc(pred.lean_direction)}`}/></div>
-          <span className="pred-pct">{pred.confidence_pct.toFixed(0)}%</span>
-          {(hasPairs||hasOrders)&&<span className="pred-tog">{open?'▲':'▼'}</span>}
-        </div>
-      ):ev.event_code&&(
-        <button className="run-btn" onClick={()=>onPredict(ev.event_code!)}>Run prediction</button>
-      )}
-      {open&&pred&&(
-        <div className="pred-detail">
-          {hasPairs&&(
-            <div className="chip-row">
-              {pred.pair_signals.slice(0,8).map(ps=>(
-                <span key={ps.pair} className={`chip chip-${dc(ps.direction)}`}>
-                  {ps.pair} <b>{ps.direction}</b> <em>{ps.confidence_pct.toFixed(0)}%</em>
-                </span>
-              ))}
-            </div>
-          )}
-          {hasOrders&&pred.order_suggestions.filter(s=>s.suggested_entry).slice(0,2).map(s=>(
-            <div key={s.pair} className="ord-row">
-              <span className={`ord-p ord-${dc(s.bias)}`}>{s.pair} {s.bias}</span>
-              <span className="ord-v">Entry <b>{fN(s.suggested_entry,5)}</b></span>
-              <span className="ord-v">SL <span className="ord-sl">{fN(s.suggested_sl,5)}</span></span>
-              <span className="ord-v">TP <span className="ord-tp">{fN(s.suggested_tp,5)}</span></span>
-              <span className="ord-ref">reference only</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Signal card ───────────────────────────────────────────────────────────────
-function SigCard({pred,onRefresh}:{pred:StoredPred;onRefresh:(c:string)=>void}) {
-  const [open,setOpen]=useState(false)
-  const hasPairs=(pred.pair_signals?.length??0)>0
-  const hasOrders=pred.order_suggestions?.some(s=>s.suggested_entry)
-  const hasIndicators=(pred.indicators?.length??0)>0
-
-  // Build "Affected majors" line from trade_signals
-  const affectedMajors = (pred.trade_signals ?? [])
-    .filter(s => s && !s.toUpperCase().startsWith('WAIT'))
-    .map(s => {
-      const parts = s.trim().split(' ')
-      const dir = parts[0] ?? ''
-      const sym = parts[1] ?? ''
-      // Insert slash for 6-char forex pairs (e.g. USDJPY → USD/JPY, XAUUSD → XAU/USD)
-      const fmtSym = sym.length === 6 ? `${sym.slice(0,3)}/${sym.slice(3)}` : sym
-      return `${dir} ${fmtSym}`
-    })
-    .join(' • ')
-
-  // Outcome badge
-  const outcomeBadge = pred.was_correct === true
-    ? <span className="sc-outcome sc-outcome-ok">✓ Correct</span>
-    : pred.was_correct === false
-      ? <span className="sc-outcome sc-outcome-err">✗ Incorrect</span>
-      : null
-
-  const hasDetails = hasPairs || hasOrders || hasIndicators
-
-  return (
-    <div className={`sc sc-${dc(pred.lean_direction)}`}>
-      <div className="sc-head">
-        <div>
-          <div className="sc-meta">
-            <span>{FLAG[pred.currency]??''}</span>
-            <span className="sc-ccy">{pred.currency}</span>
-            <span className="sc-t">{new Date(pred.created_at).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</span>
-          </div>
-          <div className="sc-name">{pred.display_name}</div>
-        </div>
-        <DTag d={pred.lean_direction}/>
-      </div>
-      <div className="sc-conf">
-        <span className="sc-pct">{pred.confidence_pct.toFixed(1)}%</span>
-        <div className="sc-bar"><Bar pct={pred.confidence_pct} cls={`bar-${dc(pred.lean_direction)}`}/></div>
-      </div>
-      {affectedMajors && (
-        <div className="sc-majors">
-          <span className="sc-majors-lbl">Affected majors:</span>
-          <span className="sc-majors-val">{affectedMajors}</span>
-        </div>
-      )}
-      {outcomeBadge}
-      <div className="sc-actions">
-        {hasDetails&&(
-          <button className="ind-btn" onClick={()=>setOpen(v=>!v)}>
-            {open?'Details ▲':'Details ▼'}
-          </button>
-        )}
-        <button className="sc-ref" onClick={()=>onRefresh(pred.event_code)}>Refresh</button>
-      </div>
-      {open&&(
-        <div className="sc-detail">
-          {hasPairs&&(
-            <div className="chip-row">
-              {pred.pair_signals.map(ps=>(
-                <span key={ps.pair} className={`chip chip-${dc(ps.direction)}`}>
-                  {ps.pair} <b>{ps.direction}</b> <em>{ps.confidence_pct.toFixed(0)}%</em>
-                </span>
-              ))}
-            </div>
-          )}
-          {hasOrders&&pred.order_suggestions.filter(s=>s.suggested_entry&&s.bias!=='NEUTRAL').slice(0,2).map(s=>(
-            <div key={s.pair} className="ord-row">
-              <span className={`ord-p ord-${dc(s.bias)}`}>{s.pair} {s.bias}</span>
-              <span className="ord-v">Entry <b>{fN(s.suggested_entry,5)}</b></span>
-              <span className="ord-v">SL <span className="ord-sl">{fN(s.suggested_sl,5)}</span></span>
-              <span className="ord-v">TP <span className="ord-tp">{fN(s.suggested_tp,5)}</span></span>
-              <span className="ord-ref">reference only</span>
-            </div>
-          ))}
-          {hasIndicators&&(
-            <div className="ind-list">
-              {pred.indicators.map((ind,i)=>(
-                <div key={i} className="ind-row">
-                  <span className={`ind-dot ind-${ind.signal>0?'bull':ind.signal<0?'bear':'flat'}`}>
-                    {ind.signal>0?'▲':ind.signal<0?'▼':'●'}
-                  </span>
-                  <span className="ind-desc">{ind.description}</span>
-                  <span className="ind-z">{ind.z_score!=null?ind.z_score.toFixed(2):'—'}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Currency meter ────────────────────────────────────────────────────────────
-function Meter({cs,ccy}:{cs:CcyStrength|null;ccy:string}) {
-  const score=cs?.strength_score??null
-  const pct=score!=null?Math.abs(score)*100:0
-  const bull=(score??0)>=0
-  const noData=score==null||(score===0&&(cs?.n_trained??0)===0)
-  return (
-    <div className={`meter${noData?' meter-empty':''}`}>
-      <div className="m-head">
-        <span className="m-flag">{FLAG[ccy]??''}</span>
-        <span className="m-ccy">{ccy}</span>
-        <span className={`m-score${noData?' m-none':` m-${dc(score!=null&&score>0.05?'BULLISH':score!=null&&score<-0.05?'BEARISH':'INLINE')}`}`}>
-          {noData?'—':`${(score??0)>=0?'+':''}${((score??0)*100).toFixed(1)}`}
-        </span>
-      </div>
-      <div className="m-track">
-        <div className="m-ctr"/>
-        {!noData&&<div className={`m-fill ${bull?'m-bull':'m-bear'}`} style={{width:`${pct/2}%`,left:bull?'50%':`${50-pct/2}%`}}/>}
-      </div>
-      <div className="m-foot">
-        <span>{cs?`n=${cs.n_trained}`:'No data'}</span>
-        {cs?.recorded_at&&<span>{new Date(cs.recorded_at).toLocaleDateString('en-GB',{month:'short',day:'numeric'})}</span>}
-      </div>
-    </div>
-  )
-}
-
-// ── Pair bias row ─────────────────────────────────────────────────────────────
-function PairRow({pb}:{pb:PairBias}) {
-  const d=dc(pb.direction)
-  return (
-    <div className={`pair-row pair-${d}`}>
-      <span className="pr-pair">{pb.pair}</span>
-      <span className={`pr-dir pr-${d}`}>{pb.direction}</span>
-      <span className={`pr-bias ${pb.bias>0?'pr-pos':pb.bias<0?'pr-neg':''}`}>
-        {pb.bias>0?'+':''}{(pb.bias*100).toFixed(1)}
-      </span>
-      <div className="pr-bar"><Bar pct={pb.confidence_pct} cls={`bar-${d}`}/></div>
-      <span className="pr-conf">{pb.confidence_pct.toFixed(0)}%</span>
-    </div>
-  )
-}
-
-// ── Model learning panel ──────────────────────────────────────────────────────
-function ModelPanel({models,trend}:{models:ModelStatus[];trend:AccTrendCcy[]}) {
-  const fwKeys = ['indicator_score','rate_diff_score','cot_score','sentiment_score']
-
-  return (
-    <div className="model-panel">
-      <div className="mp-title">Model learning status</div>
-      <div className="mp-grid">
-        {models.map(m=>{
-          const trendRow = trend.find(t=>t.currency===m.currency)
-          const lastW = trendRow?.windows.slice(-1)[0]
-          return (
-            <div key={m.currency} className={`mp-card mp-${m.status}`}>
-              <div className="mp-head">
-                <span>{FLAG[m.currency]??''}</span>
-                <span className="mp-ccy">{m.currency}</span>
-                <span className={`mp-status mp-s-${m.status}`}>
-                  {m.status==='learning'?'Learning':m.status==='seeded_only'?'Seeded':'Untrained'}
-                </span>
-              </div>
-              <div className="mp-stats">
-                <span className="mp-n">n={m.n_trained}</span>
-                {m.n_real>0&&<span className="mp-real">+{m.n_real} real</span>}
-                {m.live_accuracy!=null&&(
-                  <span className="mp-acc">{(m.live_accuracy*100).toFixed(1)}% acc</span>
-                )}
-                {lastW&&<span className="mp-last">Last 10: {lastW.hit_rate_pct.toFixed(0)}%</span>}
-                {trendRow?.improving&&<span className="mp-up">↑ improving</span>}
-              </div>
-              {/* Feature weight bar */}
-              {Object.keys(m.feature_weights).length>0&&(
-                <div className="mp-fw" title={fwKeys.map(k=>`${FW_LABELS[k]}: ${((m.feature_weights[k]??0)*100).toFixed(0)}%`).join(' | ')}>
-                  {fwKeys.map((k,i)=>(
-                    <div key={k} className="mp-fw-seg" style={{
-                      width:`${((m.feature_weights[k]??0)*100).toFixed(1)}%`,
-                      background:FW_COLS[i],
-                    }}/>
-                  ))}
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-      {/* Legend */}
-      <div className="mp-legend">
-        {fwKeys.map((k,i)=>(
-          <span key={k} className="mp-leg-item">
-            <span className="mp-leg-dot" style={{background:FW_COLS[i]}}/>
-            {FW_LABELS[k]}
-          </span>
-        ))}
-        <span className="mp-leg-note">
-          n=10 = seed only · n&gt;10 = real learn_one() calls fired
-        </span>
-      </div>
-    </div>
-  )
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
-// APP
+// MODEL PROGRESS PAGE
 // ══════════════════════════════════════════════════════════════════════════════
-export default function App() {
-  // ── Clock: ticks every second for live countdown ─────────────────────────
-  const [now,setNow] = useState(Date.now())
-  useEffect(()=>{ const id=setInterval(()=>setNow(Date.now()),1000); return()=>clearInterval(id) },[])
 
-  const [tab,setTab]     = useState<Tab>('calendar')
-  const [busy,setBusy]   = useState(false)
-  const [toast,setToast] = useState<string|null>(null)
-
-  // ── One-shot startup flags ────────────────────────────────────────────────
-  const warmupDone   = useRef(false)
-  const strengthDone = useRef(false)
-
-  // ── Data ──────────────────────────────────────────────────────────────────
-  const [calEvents,  setCal]  = useState<CalEvent[]>([])
-  const [strengths,  setStr]  = useState<CcyStrength[]>([])
-  const [pairBiases, setPB]   = useState<PairBias[]>([])
-  const [preds,      setPred] = useState<StoredPred[]>([])
-  const [history,    setHist] = useState<HistItem[]>([])
-  const [accuracy,   setAcc]  = useState<AccStats|null>(null)
-  const [models,     setModels]= useState<ModelStatus[]>([])
-  const [trend,      setTrend]= useState<AccTrendCcy[]>([])
-
-  // ── Filters — persisted ───────────────────────────────────────────────────
-  const [ccySel,  setCcySel]  = useState<string[]>(()=>ls(LS_CCY,  ALL_CCYS))
-  const [pairSel, setPairSel] = useState<string[]>(()=>ls(LS_PAIRS,ALL_PAIRS))
-
-  const toggleCcy = (c:string) => setCcySel(prev=>{
-    const next=prev.includes(c)?prev.filter(x=>x!==c):[...prev,c]
-    saveLs(LS_CCY,next); return next
-  })
-  const togglePair = (p:string) => setPairSel(prev=>{
-    const next=prev.includes(p)?prev.filter(x=>x!==p):[...prev,p]
-    saveLs(LS_PAIRS,next); return next
-  })
-
-  const flash = (msg:string)=>{ setToast(msg); setTimeout(()=>setToast(null),3500) }
-
-  // ── Fetchers ──────────────────────────────────────────────────────────────
-  const loadCal = useCallback(async(force=false)=>{
-    setBusy(true)
-    try { const r=await axios.get(`${API}/events${force?'?force_refresh=true':''}`); setCal(r.data.events??[]) }
-    catch(e:any){ flash(`Calendar: ${e.message}`) }
-    finally{ setBusy(false) }
-  },[])
-
-  const loadStr = useCallback(async()=>{
-    setBusy(true)
-    try {
-      const [sr,pbr]=await Promise.all([axios.get(`${API}/currency-strengths`),axios.get(`${API}/pair-biases`)])
-      setStr(sr.data.currency_strengths??[])
-      setPB(pbr.data.pair_biases??[])
-    } catch(e:any){ flash(`Strength: ${e.message}`) }
-    finally{ setBusy(false) }
-  },[])
-
-  const loadSig = useCallback(async()=>{
-    setBusy(true)
-    try { const r=await axios.get(`${API}/predictions?limit=40`); setPred(r.data.predictions??[]) }
-    catch(e:any){ flash(`Signals: ${e.message}`) }
-    finally{ setBusy(false) }
-  },[])
-
-  const loadRes = useCallback(async()=>{
-    setBusy(true)
-    try {
-      const [h,a]=await Promise.all([axios.get(`${API}/history?limit=60`),axios.get(`${API}/accuracy`)])
-      setHist(h.data.history??[]); setAcc(a.data)
-    } catch(e:any){ flash(`Results: ${e.message}`) }
-    finally{ setBusy(false) }
-  },[])
-
-  const loadModels = useCallback(async()=>{
-    try {
-      const [ms,at]=await Promise.all([axios.get(`${API}/model-status`),axios.get(`${API}/accuracy-trend`)])
-      setModels(ms.data.currencies??[])
-      setTrend(at.data.trend??[])
-    } catch{ /* non-fatal */ }
-  },[])
-
-  // Load on tab switch
-  useEffect(()=>{
-    if(tab==='calendar') loadCal()
-    if(tab==='strength'){ loadStr(); loadModels() }
-    if(tab==='signals')  loadSig()
-    if(tab==='results')  loadRes()
-  },[tab]) // eslint-disable-line
-
-  // Warmup: fire once after first calendar load
-  useEffect(()=>{
-    if(calEvents.length>0&&!warmupDone.current){
-      warmupDone.current=true
-      axios.post(`${API}/predictions/warmup`).catch(()=>{})
-      setTimeout(async()=>{
-        try {
-          const [ev,sp]=await Promise.all([axios.get(`${API}/events`),axios.get(`${API}/predictions?limit=40`)])
-          setCal(ev.data.events??[]); setPred(sp.data.predictions??[])
-        } catch{}
-      },15000)
-    }
-    if(calEvents.length>0&&!strengthDone.current){
-      strengthDone.current=true
-      axios.post(`${API}/run-full-cycle`).catch(()=>{})
-      setTimeout(async()=>{
-        try {
-          const [sr,pbr]=await Promise.all([axios.get(`${API}/currency-strengths`),axios.get(`${API}/pair-biases`)])
-          setStr(sr.data.currency_strengths??[]); setPB(pbr.data.pair_biases??[])
-        } catch{}
-      },35000)
-    }
-  },[calEvents.length]) // eslint-disable-line
-
-  // ── Actions ───────────────────────────────────────────────────────────────
-  const runPred = useCallback(async(code:string)=>{
-    setBusy(true)
-    try {
-      await axios.get(`${API}/prediction/${code}`)
-      flash(`${code}: done`)
-      if(tab==='calendar') loadCal()
-      if(tab==='signals')  loadSig()
-    } catch(e:any){ flash(`${code}: ${e.message}`) }
-    finally{ setBusy(false) }
-  },[tab,loadCal,loadSig])
-
-  const syncActuals = async()=>{
-    setBusy(true)
-    try {
-      const r=await axios.post(`${API}/events/sync-actuals`)
-      flash(`${r.data.newly_graded} graded`)
-      loadCal(true); loadModels()
-    } catch(e:any){ flash(`Sync: ${e.message}`) }
-    finally{ setBusy(false) }
+function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTrendWindow[]; improving: boolean }) {
+  if (windows.length < 2) {
+    return (
+      <div className="trend-card">
+        <div className="trend-card-head">
+          <span>{FLAG[ccy] ?? ''}</span>
+          <span>{ccy}</span>
+        </div>
+        <div className="trend-no-data">Not enough data yet</div>
+      </div>
+    )
   }
 
-  // ── Filtered data ─────────────────────────────────────────────────────────
-  const filtCal  = useMemo(()=>calEvents.filter(e=>ccySel.includes(e.currency)),[calEvents,ccySel])
-  const filtPred = useMemo(()=>preds.filter(p=>ccySel.includes(p.currency)),[preds,ccySel])
-  const filtStr  = useMemo(()=>ALL_CCYS.filter(c=>ccySel.includes(c)),[ccySel])
-  const filtPairs= useMemo(()=>pairBiases.filter(pb=>pairSel.includes(pb.pair)),[pairBiases,pairSel])
+  const W = 300
+  const H = 100
+  const PAD = { top: 10, right: 10, bottom: 20, left: 30 }
+  const chartW = W - PAD.left - PAD.right
+  const chartH = H - PAD.top - PAD.bottom
 
-  const calByDate = useMemo(()=>{
-    const r:Record<string,CalEvent[]>={}
-    for(const ev of filtCal){ const k=fmtD(ev.release_time_utc)||'Unknown'; if(!r[k])r[k]=[]; r[k].push(ev) }
-    return r
-  },[filtCal])
+  const vals = windows.map(w => w.hit_rate_pct)
+  const minVal = Math.max(0, Math.min(...vals) - 5)
+  const maxVal = Math.min(100, Math.max(...vals) + 5)
 
-  // ── RENDER ────────────────────────────────────────────────────────────────
+  const xScale = (i: number) => PAD.left + (i / (windows.length - 1)) * chartW
+  const yScale = (v: number) => PAD.top + chartH - ((v - minVal) / (maxVal - minVal)) * chartH
+
+  const points = windows.map((w, i) => `${xScale(i)},${yScale(w.hit_rate_pct)}`).join(' ')
+
   return (
-    <div className="app">
-      {toast&&<div className="toast">{toast}</div>}
+    <div className="trend-card">
+      <div className="trend-card-head">
+        <span>{FLAG[ccy] ?? ''}</span>
+        <span>{ccy}</span>
+        {improving && <span className="trend-improving">↑ improving</span>}
+      </div>
+      <div className="trend-svg-wrap">
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} aria-label={`${ccy} accuracy trend`}>
+          {/* Grid lines */}
+          {[0, 50, 100].map(v => {
+            if (v < minVal || v > maxVal) return null
+            const y = yScale(v)
+            return (
+              <g key={v}>
+                <line x1={PAD.left} y1={y} x2={W - PAD.right} y2={y}
+                  stroke="rgba(255,255,255,0.05)" strokeWidth={1} />
+                <text x={PAD.left - 4} y={y + 4} fontSize={8} fill="rgba(255,255,255,0.3)" textAnchor="end">{v}</text>
+              </g>
+            )
+          })}
+          {/* 50% reference */}
+          {minVal < 50 && maxVal > 50 && (
+            <line x1={PAD.left} y1={yScale(50)} x2={W - PAD.right} y2={yScale(50)}
+              stroke="rgba(99,102,241,0.3)" strokeWidth={1} strokeDasharray="4 4" />
+          )}
+          {/* Line */}
+          <polyline
+            points={points}
+            fill="none"
+            stroke="#6366f1"
+            strokeWidth={2}
+            strokeLinejoin="round"
+          />
+          {/* Dots */}
+          {windows.map((w, i) => (
+            <circle
+              key={i}
+              cx={xScale(i)}
+              cy={yScale(w.hit_rate_pct)}
+              r={3}
+              fill="#6366f1"
+            />
+          ))}
+        </svg>
+      </div>
+    </div>
+  )
+}
 
-      {/* ── Top bar ──────────────────────────────────────────────────────── */}
-      <header className="topbar">
-        <div className="tb-inner">
-          {/* Logo */}
-          <div className="brand"><span className="bdot"/><span className="bname">MacroPredictor</span></div>
+function ModelPage({ ccySel }: { ccySel: string[] }) {
+  const [models, setModels] = useState<ModelStatus[]>([])
+  const [trend, setTrend] = useState<AccTrendCcy[]>([])
+  const [accStats, setAccStats] = useState<AccStats | null>(null)
+  const [loading, setLoading] = useState(true)
 
-          {/* Currency filter chips — always visible */}
-          <div className="tb-chips">
-            <CcyFilter sel={ccySel} toggle={toggleCcy}/>
-          </div>
+  useEffect(() => {
+    setLoading(true)
+    Promise.all([
+      axios.get(`${API}/model-status`),
+      axios.get(`${API}/accuracy-trend`),
+      axios.get(`${API}/accuracy`),
+    ])
+      .then(([ms, at, ac]) => {
+        setModels(ms.data.currencies ?? [])
+        setTrend(at.data.trend ?? [])
+        setAccStats(ac.data)
+      })
+      .catch(() => { /* show empty state */ })
+      .finally(() => setLoading(false))
+  }, [])
 
-          {/* Tabs */}
-          <nav className="tb-tabs">
-            {(['calendar','signals','strength','results'] as Tab[]).map(t=>(
-              <button key={t} className={`tab-btn${tab===t?' tab-on':''}`} onClick={()=>setTab(t)}>
-                {t==='calendar'?'Calendar':t==='signals'?'Signals':t==='strength'?'Strength':'Results'}
-              </button>
-            ))}
-          </nav>
+  const filtModels = useMemo(() => models.filter(m => ccySel.includes(m.currency)), [models, ccySel])
+  const filtTrend = useMemo(() => trend.filter(t => ccySel.includes(t.currency)), [trend, ccySel])
 
-          {/* Actions + spinner */}
-          <div className="tb-right">
-            {busy&&<span className="spin"/>}
-            {tab==='calendar'&&<>
-              <button className="btn" onClick={()=>loadCal(true)} disabled={busy}>Refresh</button>
-              <button className="btn btn-p" onClick={syncActuals} disabled={busy}>Sync Actuals</button>
-            </>}
-            {tab==='strength'&&<button className="btn" onClick={()=>{loadStr();loadModels()}} disabled={busy}>Refresh</button>}
-            {tab==='signals' &&<button className="btn" onClick={loadSig}  disabled={busy}>Refresh</button>}
-            {tab==='results' &&<button className="btn" onClick={loadRes}  disabled={busy}>Refresh</button>}
-          </div>
-        </div>
-      </header>
+  if (loading) {
+    return (
+      <div className="page">
+        <div className="loading-center"><Spinner /><span>Loading model data…</span></div>
+      </div>
+    )
+  }
 
-      {/* ── Next-event banner ─────────────────────────────────────────────── */}
-      <Banner events={calEvents} now={now}/>
+  // Calibration: compute from accStats
+  const calibRows = (accStats?.confidence_stats ?? []).filter(c => c.total > 0)
+  const bucketMidpoints: Record<string, number> = {
+    '<60%': 55, '60-70%': 65, '70-80%': 75, '>80%': 85,
+  }
 
-      {/* ── Pair filter — Strength tab only ──────────────────────────────── */}
-      {tab==='strength'&&(
-        <div className="filter-bar filter-bar-sub">
-          <PairFilter sel={pairSel} toggle={togglePair}/>
+  return (
+    <div className="page">
+
+      {/* Section 1: Learning Status */}
+      <div className="section-title">Learning Status</div>
+      {filtModels.length === 0 ? (
+        <div className="empty-state"><p>No data for selected currencies.</p></div>
+      ) : (
+        <div className="model-grid">
+          {filtModels.map(m => (
+            <div key={m.currency} className="model-card">
+              <div className="model-card-head">
+                <span className="model-flag">{FLAG[m.currency] ?? ''}</span>
+                <span className="model-ccy">{m.currency}</span>
+                <span className={`status-badge ${m.status}`}>
+                  {m.status === 'learning' ? 'Learning' : m.status === 'seeded_only' ? 'Seeded' : 'Untrained'}
+                </span>
+              </div>
+              <div className="model-n">n = {m.n_trained}</div>
+              <div className="model-n-sub">
+                {m.n_real > 0 ? `${m.n_real} real learn_one() calls` : 'Seed data only (first 10 are seeds)'}
+              </div>
+              {m.live_accuracy != null && (
+                <div className="model-acc">{(m.live_accuracy * 100).toFixed(1)}% accuracy</div>
+              )}
+            </div>
+          ))}
         </div>
       )}
 
-      {/* ── Main content ─────────────────────────────────────────────────── */}
-      <main className="main">
-
-        {/* CALENDAR ────────────────────────────────────────────────────── */}
-        {tab==='calendar'&&(
-          <div className="cal-wrap">
-            {filtCal.length===0&&!busy&&(
-              <div className="empty">
-                <p>{calEvents.length===0?'No events loaded.':'No events match the selected currencies.'}</p>
-                <p className="empty-s">{calEvents.length===0?'Click Refresh to pull this week\'s calendar.':'Toggle currencies in the top bar to show more events.'}</p>
-              </div>
-            )}
-            {Object.entries(calByDate).map(([dk,evs])=>(
-              <section key={dk} className="cal-sec">
-                <div className="cal-dh">{dk}</div>
-                {evs.map((ev,i)=>(
-                  <CalCard key={`${ev.event_code}-${i}`} ev={ev} now={now} onPredict={runPred}/>
-                ))}
-              </section>
-            ))}
-          </div>
-        )}
-
-        {/* SIGNALS ─────────────────────────────────────────────────────── */}
-        {tab==='signals'&&(
-          <div className="sig-wrap">
-            {filtPred.length===0&&!busy&&(
-              <div className="empty">
-                <p>{preds.length===0?'Predictions loading.':'No predictions match the selected currencies.'}</p>
-                <p className="empty-s">{preds.length===0?'Generating for high-impact events — takes ~15 seconds on first load.':'Toggle currencies in the top bar.'}</p>
-              </div>
-            )}
-            <div className="sig-grid">
-              {filtPred.map(p=><SigCard key={p.id} pred={p} onRefresh={runPred}/>)}
-            </div>
-          </div>
-        )}
-
-        {/* STRENGTH ────────────────────────────────────────────────────── */}
-        {tab==='strength'&&(
-          <div className="str-wrap">
-            {/* 8 currency meters */}
-            <div className="str-grid">
-              {filtStr.map(ccy=>{
-                const cs=strengths.find(s=>s.currency===ccy)??null
-                return <Meter key={ccy} cs={cs} ccy={ccy}/>
-              })}
-            </div>
-
-            {/* Pair bias grid */}
-            {filtPairs.length>0?(
-              <div className="pb-sec">
-                <div className="sec-lbl">Pair bias</div>
-                <div className="pb-list">{filtPairs.map(pb=><PairRow key={pb.pair} pb={pb}/>)}</div>
-              </div>
-            ):pairBiases.length>0?(
-              <div className="empty"><p>No pairs match current filter.</p><p className="empty-s">Toggle pairs in the filter bar above.</p></div>
-            ):(
-              <div className="empty"><p>Pair bias loading.</p><p className="empty-s">Strength cycle runs automatically on first load (~35s).</p></div>
-            )}
-
-            {/* Model learning panel */}
-            {models.length>0&&<ModelPanel models={models} trend={trend}/>}
-          </div>
-        )}
-
-        {/* RESULTS ─────────────────────────────────────────────────────── */}
-        {tab==='results'&&(
-          <div className="res-wrap">
-            {history.length===0&&!busy&&(
-              <div className="empty">
-                <p>No graded predictions yet.</p>
-                <p className="empty-s">Results appear after a release prints and is graded against the pre-release forecast. Use Sync Actuals on Calendar to trigger grading.</p>
-              </div>
-            )}
-            {history.length>0&&accuracy&&<>
-              <div className="kpi-row">
-                {[
-                  {v:accuracy.total_predictions,l:'Predictions',c:''},
-                  {v:accuracy.wins,l:'Correct',c:'kv-bull'},
-                  {v:accuracy.losses,l:'Incorrect',c:'kv-bear'},
-                  {v:`${accuracy.overall_hit_rate.toFixed(1)}%`,l:'Hit Rate',c:accuracy.overall_hit_rate>=60?'kv-bull':'kv-amb'},
-                ].map(({v,l,c})=>(
-                  <div key={l} className="kpi"><div className={`kv ${c}`}>{v}</div><div className="kl">{l}</div></div>
-                ))}
-              </div>
-              {accuracy.confidence_stats?.length>0&&(
-                <div className="bkt-card">
-                  <div className="sec-lbl">Accuracy by confidence band</div>
-                  {accuracy.confidence_stats.map(b=>(
-                    <div key={b.bucket} className="bkt-row">
-                      <span className="bkt-n">{b.bucket}</span>
-                      <div className="bkt-b"><Bar pct={b.hit_rate_pct} cls={b.hit_rate_pct>=60?'bar-bull':'bar-amb'}/></div>
-                      <span className="bkt-p">{b.hit_rate_pct.toFixed(0)}%</span>
-                      <span className="bkt-cnt">{b.wins}/{b.total}</span>
-                    </div>
-                  ))}
+      {/* Section 2: Feature Importance */}
+      <div className="section-title">Feature Importance</div>
+      {filtModels.length === 0 ? (
+        <div className="empty-state"><p>No data.</p></div>
+      ) : (
+        <div className="features-grid">
+          {filtModels.map(m => {
+            const weights = m.feature_weights ?? {}
+            return (
+              <div key={m.currency} className="fw-card">
+                <div className="fw-card-head">
+                  <span>{FLAG[m.currency] ?? ''}</span>
+                  <span>{m.currency}</span>
                 </div>
-              )}
-              <div className="ledger">
-                <div className="l-hd">
-                  <span>Event</span><span>Lean</span><span>Forecast</span>
-                  <span>Actual</span><span>Surprise</span><span>Conf</span><span>✓✗</span>
-                </div>
-                {history.map(h=>{
-                  const s=h.surprise??0
+                {FW_KEYS.map((k, i) => {
+                  const w = weights[k] ?? 0
                   return (
-                    <div key={h.id} className="l-row">
-                      <span className="l-name">{FLAG[h.currency]??''} {h.display_name}</span>
-                      <span className={`l-lean l-${dc(h.lean_direction)}`}>{dl(h.lean_direction).slice(0,4)}</span>
-                      <span className="l-num">{fN(h.forecast)}</span>
-                      <span className="l-num l-act">{fN(h.actual)}</span>
-                      <span className={`l-num ${s>0?'l-pos':s<0?'l-neg':''}`}>{h.surprise!=null?`${s>0?'+':''}${s.toFixed(3)}`:'—'}</span>
-                      <span className="l-num">{h.confidence_pct?.toFixed(0)}%</span>
-                      <span className={h.was_correct?'l-ok':'l-no'}>{h.was_correct?'✓':'✗'}</span>
+                    <div key={k} className="fw-row">
+                      <span className="fw-label">{FW_LABELS[k]}</span>
+                      <div className="fw-bar-outer">
+                        <div
+                          className="fw-bar-inner"
+                          style={{ width: `${Math.min(w * 100, 100)}%`, background: FW_COLORS[i] }}
+                        />
+                      </div>
+                      <span className="fw-pct">{(w * 100).toFixed(0)}%</span>
                     </div>
                   )
                 })}
               </div>
-            </>}
-          </div>
-        )}
+            )
+          })}
+        </div>
+      )}
 
-      </main>
+      {/* Section 3: Accuracy Trend */}
+      <div className="section-title">Accuracy Trend</div>
+      {filtTrend.length === 0 ? (
+        <div className="empty-state"><p>No trend data yet.</p></div>
+      ) : (
+        <div className="trend-charts-grid">
+          {filtTrend.map(t => (
+            <TrendChart key={t.currency} ccy={t.currency} windows={t.windows} improving={t.improving} />
+          ))}
+        </div>
+      )}
+
+      {/* Section 4: Calibration Check */}
+      <div className="section-title">Calibration Check</div>
+      {calibRows.length === 0 ? (
+        <div className="empty-state"><p>No graded predictions yet.</p></div>
+      ) : (
+        <div className="calib-card">
+          {calibRows.map(row => {
+            const expected = bucketMidpoints[row.bucket] ?? 70
+            const diverges = Math.abs(row.hit_rate_pct - expected) > 10
+            return (
+              <div key={row.bucket} className="calib-row">
+                <span className="calib-bucket">{row.bucket}</span>
+                <div className="calib-bar-outer">
+                  <div
+                    className={`calib-bar-inner${diverges ? ' flag' : ''}`}
+                    style={{ width: `${row.hit_rate_pct}%` }}
+                  />
+                </div>
+                <span className={`calib-pct${diverges ? ' text-bear' : ''}`}>
+                  {row.hit_rate_pct.toFixed(0)}%
+                </span>
+                <span className="calib-expected">exp. ~{expected}%</span>
+                {diverges && <span className="calib-flag-icon" title="Diverges from expected">⚠️</span>}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TRACK RECORD PAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+type ResultFilter = 'all' | 'wins' | 'losses'
+
+function TrackPage({ ccySel }: { ccySel: string[] }) {
+  const [history, setHistory] = useState<HistItem[]>([])
+  const [accStats, setAccStats] = useState<AccStats | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [resultFilter, setResultFilter] = useState<ResultFilter>('all')
+
+  useEffect(() => {
+    setLoading(true)
+    Promise.all([
+      axios.get(`${API}/history?limit=60`),
+      axios.get(`${API}/accuracy`),
+    ])
+      .then(([h, a]) => {
+        setHistory(h.data.history ?? [])
+        setAccStats(a.data)
+      })
+      .catch(() => { /* show empty state */ })
+      .finally(() => setLoading(false))
+  }, [])
+
+  const filtered = useMemo(
+    () => history.filter(h => ccySel.includes(h.currency)),
+    [history, ccySel]
+  )
+
+  const ledger = useMemo(() => {
+    if (resultFilter === 'wins') return filtered.filter(h => h.was_correct)
+    if (resultFilter === 'losses') return filtered.filter(h => !h.was_correct)
+    return filtered
+  }, [filtered, resultFilter])
+
+  const wins = useMemo(() => filtered.filter(h => h.was_correct).length, [filtered])
+  const winRate = filtered.length > 0 ? (wins / filtered.length) * 100 : 0
+  const avgConf = filtered.length > 0
+    ? filtered.reduce((s, h) => s + h.confidence_pct, 0) / filtered.length
+    : 0
+
+  if (loading) {
+    return (
+      <div className="page">
+        <div className="loading-center"><Spinner /><span>Loading track record…</span></div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="page">
+
+      {/* KPI row */}
+      <div className="kpi-row">
+        <div className="kpi-card">
+          <div className="kpi-value">{filtered.length}</div>
+          <div className="kpi-label">Predictions</div>
+        </div>
+        <div className="kpi-card">
+          <div className={`kpi-value ${winRate >= 60 ? 'green' : winRate >= 50 ? 'yellow' : ''}`}>
+            {filtered.length > 0 ? `${winRate.toFixed(0)}%` : '—'}
+          </div>
+          <div className="kpi-label">Win Rate</div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-value yellow">
+            {filtered.length > 0 ? `${avgConf.toFixed(0)}%` : '—'}
+          </div>
+          <div className="kpi-label">Avg Confidence</div>
+        </div>
+      </div>
+
+      {/* Confidence bucket accuracy */}
+      {accStats && accStats.confidence_stats.filter(c => c.total > 0).length > 0 && (
+        <>
+          <div className="section-title">Accuracy by Confidence</div>
+          <div className="bucket-list">
+            {accStats.confidence_stats.filter(c => c.total > 0).map(c => (
+              <div key={c.bucket} className="bucket-row">
+                <span className="bucket-label">{c.bucket}</span>
+                <span className="bucket-count">{c.total} calls</span>
+                <div className="bucket-bar-outer">
+                  <div className="bucket-bar-inner" style={{ width: `${c.hit_rate_pct}%` }} />
+                </div>
+                <span className="bucket-pct">{c.hit_rate_pct.toFixed(0)}%</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Result filter */}
+      <div className="result-filter" role="group" aria-label="Filter results">
+        {(['all', 'wins', 'losses'] as ResultFilter[]).map(f => (
+          <button
+            key={f}
+            className={`result-filter-btn${resultFilter === f ? ' active' : ''}`}
+            onClick={() => setResultFilter(f)}
+            aria-pressed={resultFilter === f}
+          >
+            {f === 'all' ? 'All' : f === 'wins' ? 'Wins' : 'Losses'}
+          </button>
+        ))}
+      </div>
+
+      {/* Ledger */}
+      {ledger.length === 0 ? (
+        <div className="empty-state">
+          <p>{filtered.length === 0 ? 'No history for selected currencies.' : 'No results match this filter.'}</p>
+        </div>
+      ) : (
+        <div className="ledger-wrap">
+          <table className="ledger-table">
+            <thead>
+              <tr>
+                <th>Event</th>
+                <th>CCY</th>
+                <th>Direction</th>
+                <th>Conf</th>
+                <th>Result</th>
+                <th>Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ledger.map(item => (
+                <tr key={item.id}>
+                  <td className="ledger-event" title={item.display_name}>{item.display_name}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{FLAG[item.currency] ?? ''} {item.currency}</td>
+                  <td className={`ledger-dir ${directionClass(item.lean_direction)}`}>
+                    {directionLabel(item.lean_direction)}
+                  </td>
+                  <td className="ledger-conf">{item.confidence_pct.toFixed(0)}%</td>
+                  <td className="ledger-result">{item.was_correct ? '✅' : '❌'}</td>
+                  <td className="ledger-date">{item.date ? formatDate(item.date) : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// APP ROOT
+// ══════════════════════════════════════════════════════════════════════════════
+
+export default function App() {
+  const [page, setPage] = useState<Page>('home')
+  const [now, setNow] = useState(Date.now())
+
+  // Persisted currency filter — default USD on first load
+  const [ccySel, setCcySel] = useState<string[]>(() => ls(LS_KEY, ['USD']))
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const toggleCcy = useCallback((c: string) => {
+    setCcySel(prev => {
+      // Must keep at least one selected
+      if (prev.includes(c) && prev.length === 1) return prev
+      const next = prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c]
+      saveLs(LS_KEY, next)
+      return next
+    })
+  }, [])
+
+  return (
+    <div className="app">
+      <div className="layout">
+        <SideNav page={page} setPage={setPage} />
+
+        <div className="content">
+          <CurrencyFilter sel={ccySel} toggle={toggleCcy} />
+
+          <main>
+            {page === 'home' && <HomePage ccySel={ccySel} now={now} />}
+            {page === 'calendar' && <CalendarPage ccySel={ccySel} now={now} />}
+            {page === 'model' && <ModelPage ccySel={ccySel} />}
+            {page === 'track' && <TrackPage ccySel={ccySel} />}
+          </main>
+        </div>
+      </div>
+
+      <BottomNav page={page} setPage={setPage} />
     </div>
   )
 }
