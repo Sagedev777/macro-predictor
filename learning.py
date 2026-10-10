@@ -63,7 +63,7 @@ ARF_DELTA          = 1e-5   # ADWIN confidence — lower = more sensitive to dri
 _DRIFT_WINDOW = 50   # last N learn_one() calls used for importance correlation
 
 # ── Seeding parameters ────────────────────────────────────────────────────────
-_SEED_SAMPLES = 10   # synthetic warm-up observations per currency
+_SEED_SAMPLES = 0   # synthetic warm-up seeding disabled — n_trained starts at 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -109,6 +109,7 @@ class _ModelRegistry:
         self._accuracy:  dict[str, object]            = {}  # currency → river.metrics.Accuracy
         self._history:   dict[str, deque]             = {}  # currency → deque of (features, outcome)
         self._loaded:    set[str]                     = set()
+        self._stored_weights: dict[str, dict]         = {}  # currency → last persisted feature_weights
 
     def _make_fresh_model(self):
         """Create a new ARFClassifier with project-standard hyperparameters."""
@@ -147,6 +148,12 @@ class _ModelRegistry:
         self._n_trained[ccy] = n_trained or 0
         self._accuracy[ccy]  = self._make_fresh_accuracy()
         self._history[ccy]   = deque(maxlen=_DRIFT_WINDOW)
+        # Restore last-known feature weights from DB so they survive restarts
+        if feature_weights:
+            try:
+                self._stored_weights[ccy] = json.loads(feature_weights) if isinstance(feature_weights, str) else feature_weights
+            except Exception:
+                pass
         self._loaded.add(ccy)
         return model
 
@@ -226,60 +233,10 @@ def _features_to_class(features: dict) -> int:
 
 def seed_models_with_priors() -> dict[str, int]:
     """
-    Warm-start all 8 currency models using current COT + rate differential
-    as the initial prior ("what the market already believes").
-
-    Called once on first startup (when n_trained == 0 for a currency).
-    Safe to call on subsequent startups — it checks n_trained first and
-    skips currencies that have already been trained on real data.
-
-    Returns dict[currency → samples_seeded].
+    Synthetic seeding stopped per data-integrity requirement.
+    Models start at n_trained = 0 and learn strictly from real graded predictions.
     """
-    from config.events import CURRENCIES
-    from data_sources import get_rate_differential, rate_diff_to_score
-    from sentiment import get_latest_cot, cot_to_score
-
-    seeded: dict[str, int] = {}
-
-    for ccy in CURRENCIES:
-        n = _registry.get_n_trained(ccy)
-        if n > 0:
-            log.info("Skipping seed for %s — already has %d real training samples.", ccy, n)
-            continue
-
-        # Build prior features from COT + rate differential
-        rate_diff = get_rate_differential(ccy)
-        cot_result = get_latest_cot(ccy)
-
-        rd_score  = rate_diff_to_score(rate_diff)
-        cot_score = cot_to_score(cot_result)
-
-        prior_features = build_features(
-            indicator_score=0.0,       # no indicator data yet
-            rate_diff_score=rd_score,
-            cot_score=cot_score,
-            sentiment_score=0.0,       # no sentiment yet
-        )
-        prior_class = _features_to_class(prior_features)
-
-        model = _registry.get(ccy)
-        for _ in range(_SEED_SAMPLES):
-            model.learn_one(prior_features, prior_class)
-
-        n_seeded = _SEED_SAMPLES
-        _registry._n_trained[ccy] = n_seeded
-        _registry.update(
-            ccy, model, n_seeded,
-            live_accuracy=None,
-            feature_weights=json.dumps({k: 1.0 / len(FEATURE_NAMES) for k in FEATURE_NAMES}),
-        )
-        seeded[ccy] = n_seeded
-        log.info(
-            "Seeded %s with %d synthetic prior samples (rd=%.3f cot=%.3f class=%d).",
-            ccy, n_seeded, rd_score, cot_score, prior_class,
-        )
-
-    return seeded
+    return {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -390,6 +347,9 @@ def learn_one(
         except Exception:
             pass
 
+    # Compute weights before and after update to track real weight shift
+    fw_before = _compute_feature_weights(ccy)
+
     # Push to history for drift tracking
     _registry.push_history(ccy, features, outcome)
 
@@ -400,26 +360,56 @@ def learn_one(
     # Persist updated model to DB
     _registry.update(ccy, model, n_trained, live_accuracy, fw_json)
 
+    weight_shift_str = format_weight_shift(fw_before, fw, len(_registry.get_history(ccy)))
+
     log.info(
-        "learn_one %s: n=%d acc=%.1f%% correct=%s drift=%s",
+        "learn_one %s: n=%d acc=%.1f%% correct=%s drift=%s shift=%s",
         ccy, n_trained,
         (live_accuracy or 0) * 100,
         was_correct,
         {k: round(v, 3) for k, v in fw.items()},
+        weight_shift_str,
     )
 
     return {
-        "currency":       ccy,
-        "n_trained":      n_trained,
-        "live_accuracy":  live_accuracy,
-        "was_correct":    was_correct,
-        "feature_weights": fw,
+        "currency":          ccy,
+        "n_trained":         n_trained,
+        "live_accuracy":     live_accuracy,
+        "was_correct":       was_correct,
+        "feature_weights":   fw,
+        "weight_shift_str":  weight_shift_str,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FEATURE IMPORTANCE DRIFT TRACKING
 # ══════════════════════════════════════════════════════════════════════════════
+
+SHORT_FEATURE_NAMES = {
+    "indicator_score": "Ind",
+    "rate_diff_score": "Rates",
+    "cot_score": "COT",
+    "sentiment_score": "Sent",
+}
+
+
+def format_weight_shift(fw_before: dict, fw_after: dict, n_history: int) -> str:
+    """Format the change in feature weights from an update."""
+    deltas = []
+    for k in FEATURE_NAMES:
+        before = fw_before.get(k, 0.25)
+        after  = fw_after.get(k, 0.25)
+        diff   = round(after - before, 4)
+        short  = SHORT_FEATURE_NAMES.get(k, k)
+        if abs(diff) >= 0.001:
+            sign = "+" if diff > 0 else ""
+            deltas.append(f"{short} {sign}{diff * 100:.1f}%")
+    if deltas:
+        return ", ".join(deltas)
+    if n_history < 5:
+        return f"Equal priors retained (n={n_history}/5) · Dynamic drift active at n=5"
+    return "No significant weight shift (<0.1%)"
+
 
 def _compute_feature_weights(currency: str) -> dict:
     """
@@ -432,6 +422,11 @@ def _compute_feature_weights(currency: str) -> dict:
     """
     history = list(_registry.get_history(currency))
     if len(history) < 5:
+        # Use last persisted weights from DB if available — better than equal fallback
+        ccy = currency.upper()
+        stored = _registry._stored_weights.get(ccy)
+        if stored and len(stored) == len(FEATURE_NAMES):
+            return stored
         equal = round(1.0 / len(FEATURE_NAMES), 4)
         return {k: equal for k in FEATURE_NAMES}
 

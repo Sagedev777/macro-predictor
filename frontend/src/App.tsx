@@ -65,6 +65,7 @@ interface HistItem {
   id: number; event_code: string; display_name: string; currency: string
   lean_direction: string; confidence_pct: number; forecast: number | null
   actual: number | null; surprise: number | null; was_correct: boolean; date: string | null
+  is_late?: boolean; weight_shift?: string | null
 }
 
 interface AccStats {
@@ -140,17 +141,25 @@ function formatPairSignal(raw: string): { dir: string; pair: string } {
   return { dir, pair: fmtSym }
 }
 
+const USD_MAJORS = ['EUR/USD','GBP/USD','USD/JPY','USD/CHF','AUD/USD','USD/CAD','XAU/USD']
+
 function buildPairsFromPred(pred: PredSummary): { dir: string; pair: string }[] {
   const signals = pred.trade_signals ?? []
   if (signals.length > 0) {
     return signals
       .filter(s => s && !s.toUpperCase().startsWith('WAIT') && !s.toUpperCase().startsWith('HOLD'))
       .map(formatPairSignal)
-      .filter(p => p.dir && p.pair)
+      .filter(p => p.dir && p.pair && USD_MAJORS.includes(p.pair))
   }
+  // Fallback: use pair_signals but only for the 7 USD majors
   return (pred.pair_signals ?? [])
+    .filter(ps => USD_MAJORS.includes(ps.pair?.replace('/', '') === ps.pair
+      ? `${ps.pair.slice(0,3)}/${ps.pair.slice(3)}` : ps.pair))
     .slice(0, 7)
-    .map(ps => ({ dir: ps.direction.toUpperCase().includes('BUY') || ps.direction.toUpperCase() === 'BULLISH' ? 'BUY' : 'SELL', pair: ps.pair }))
+    .map(ps => ({
+      dir: (ps.direction ?? '').toUpperCase().includes('BUY') || (ps.direction ?? '').toUpperCase() === 'BULLISH' ? 'BUY' : 'SELL',
+      pair: ps.pair?.length === 6 ? `${ps.pair.slice(0,3)}/${ps.pair.slice(3)}` : ps.pair
+    }))
 }
 
 function fmtNum(n: number | null, dp = 3): string {
@@ -445,8 +454,8 @@ function HomePage({ now }: { now: number }) {
         ) : (
           <div className="home-direction">
             <div className="home-no-pred">
-              <Spinner />
-              <span>Prediction loading…</span>
+              <span style={{ color: 'var(--text-dim)', fontSize: 13 }}>Pre-release signal not yet generated</span>
+              <span style={{ color: 'var(--text-dim)', fontSize: 11, marginTop: 4 }}>Will appear when indicators are fetched before release</span>
             </div>
           </div>
         )}
@@ -927,7 +936,9 @@ function ModelPage() {
                   </div>
                   <div className="mistake-field">
                     <span className="mistake-label">Weight shift</span>
-                    <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>Model updated via learn_one()</span>
+                    <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
+                      {h.weight_shift ?? 'Equal priors retained (n<5) · Dynamic drift active at n=5'}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -995,7 +1006,12 @@ function ModelPage() {
                 </span>
                 <span style={{ color: 'var(--text-dim)', fontSize: 13 }}>{row.count}</span>
                 <span className="calib-flag">
-                  {diverge ? <span className="flag-warn">!</span> : <span style={{ color: 'var(--text-dim)' }}>—</span>}
+                  {diverge
+                    ? <span className="flag-warn">!</span>
+                    : row.count < 10
+                      ? <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>min 10</span>
+                      : <span style={{ color: 'var(--text-dim)' }}>—</span>
+                  }
                 </span>
               </div>
             )

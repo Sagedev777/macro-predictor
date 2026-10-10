@@ -91,53 +91,53 @@ def _fetch_fred(series_id: str, months: int) -> Optional[pd.Series]:
 def _fetch_ecb_sdw(series_key: str, months: int) -> Optional[pd.Series]:
     """
     ECB Statistical Data Warehouse — free, no key.
-    Endpoint: https://sdw-wsrest.ecb.europa.eu/service/data/{series_key}
-    Returns JSON-LD with observations.
+    Tries the newer ECB Data Portal API first, falls back to legacy SDW.
     """
     start = (datetime.utcnow() - timedelta(days=months * 31)).strftime("%Y-%m-%d")
-    url = f"https://sdw-wsrest.ecb.europa.eu/service/data/{series_key}"
-    params = {
-        "startPeriod": start,
-        "format":      "jsondata",
-    }
-    headers = {"Accept": "application/json"}
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=20)
-        r.raise_for_status()
-        payload = r.json()
 
-        # Navigate ECB SDMX-JSON structure
-        dataset = payload.get("dataSets", [{}])[0]
-        structure = payload.get("structure", {})
+    # New ECB Data Portal endpoint (2024+)
+    url_new = f"https://data-api.ecb.europa.eu/service/data/{series_key}"
+    # Legacy SDW endpoint (kept as fallback)
+    url_old = f"https://sdw-wsrest.ecb.europa.eu/service/data/{series_key}"
 
-        # Extract time dimension labels
-        dims = structure.get("dimensions", {}).get("observation", [])
-        time_dim = next((d for d in dims if d.get("id") == "TIME_PERIOD"), None)
-        if not time_dim:
-            log.warning("ECB SDW: no TIME_PERIOD dimension for %s", series_key)
-            return None
+    for url in [url_new, url_old]:
+        params  = {"startPeriod": start, "format": "jsondata"}
+        headers = {"Accept": "application/json"}
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=20)
+            r.raise_for_status()
+            payload = r.json()
 
-        time_values = [v["id"] for v in time_dim.get("values", [])]
-        series_data = dataset.get("series", {})
+            dataset   = payload.get("dataSets", [{}])[0]
+            structure = payload.get("structure", {})
+            dims      = structure.get("dimensions", {}).get("observation", [])
+            time_dim  = next((d for d in dims if d.get("id") == "TIME_PERIOD"), None)
+            if not time_dim:
+                continue
 
-        # ECB returns one series per key; take the first available
-        if not series_data:
-            return None
+            time_values = [v["id"] for v in time_dim.get("values", [])]
+            series_data = dataset.get("series", {})
+            if not series_data:
+                continue
 
-        first_series = next(iter(series_data.values()))
-        obs = first_series.get("observations", {})
+            first_series = next(iter(series_data.values()))
+            obs = first_series.get("observations", {})
 
-        data: dict[str, float] = {}
-        for idx_str, values in obs.items():
-            idx = int(idx_str)
-            if idx < len(time_values) and values[0] is not None:
-                data[time_values[idx]] = float(values[0])
+            data: dict[str, float] = {}
+            for idx_str, values in obs.items():
+                idx = int(idx_str)
+                if idx < len(time_values) and values[0] is not None:
+                    data[time_values[idx]] = float(values[0])
 
-        return pd.Series(data).sort_index() if data else None
+            if data:
+                return pd.Series(data).sort_index()
 
-    except Exception as e:
-        log.error("ECB SDW fetch failed [%s]: %s", series_key, e)
-        return None
+        except Exception as e:
+            log.debug("ECB fetch attempt failed [%s] %s: %s", url, series_key, e)
+            continue
+
+    log.warning("ECB SDW: all endpoints failed for %s", series_key)
+    return None
 
 
 def _fetch_eurostat(dataset_code: str, months: int) -> Optional[pd.Series]:
@@ -194,7 +194,7 @@ def _fetch_ons(series_id: str, months: int) -> Optional[pd.Series]:
         return None
 
     dataset, series = series_id.split("/", 1)
-    url = f"https://api.ons.gov.uk/v1/dataset/{dataset}/timeseries/{series}/data"
+    url = f"https://api.ons.gov.uk/v1/datasets/{dataset}/timeseries/{series}/data"
     headers = {"Accept": "application/json"}
     try:
         r = requests.get(url, headers=headers, timeout=20)

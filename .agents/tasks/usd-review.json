@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "Stale 'all 8 currencies' comments in scheduler.py — module docstring, _INVERSE_EVENTS block header, and three function docstrings still reference 8 currencies. Update to 'USD only'. Confirmed at lines 8–9, 48, 427, 447, 491–493.",
+    "Stale 'multi-currency strength architecture' in config/events.py module docstring — update to reflect USD-only scope. Confirmed at line 3.",
+    "NZDUSD absent from CANONICAL_PAIRS — audit spec listed 8 USD majors including NZDUSD; implementation has 7. No NZD/USD trade signals exist in any USD event's trade_signals dict either, so the omission is internally consistent but diverges from spec. Needs a deliberate decision."
+  ],
+  "reviewDoc": "c:\\Users\\TITANFXSAGE\\Desktop\\macro-predictor\\.agents\\tasks\\usd-review.md"
+}

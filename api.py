@@ -25,6 +25,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from datetime import datetime, timezone
+
 from alerts import send_telegram_alert, send_test_message
 from calendar_feed import fetch_upcoming_red_folder_events, update_event_actual
 from config.events import CANONICAL_PAIRS, CURRENCIES, EVENTS, get_event_config
@@ -32,6 +34,7 @@ from database import (
     AlertLog,
     Prediction as PredictionModel,
     SessionLocal,
+    check_is_late,
     init_db,
     is_pre_release_prediction,
 )
@@ -181,6 +184,14 @@ def sync_actuals_from_feed():
             if not pred:
                 continue
 
+            # Data-integrity rule: only pre-release predictions count toward grading/accuracy/training
+            if not is_pre_release_prediction(pred):
+                log.info(
+                    "Skipping grading & River training for %s (id=%s): post-release/late prediction (is_late=%s)",
+                    code, pred.id, pred.is_late
+                )
+                continue
+
             was_correct, verdict_msg = grade_prediction(
                 code, pred.lean_direction, actual, forecast
             )
@@ -193,9 +204,7 @@ def sync_actuals_from_feed():
             pred.was_correct     = was_correct
             db.commit()
 
-            # ── River learn_one() after grading ───────────────────────────────
-            # Fires on every graded prediction — pre-release check only gates
-            # the accuracy ledger display, not the training loop.
+            # ── River learn_one() after grading — strictly pre-release only ───
             try:
                 from learning import _registry
                 n_before = _registry.get_n_trained(currency)
@@ -213,11 +222,13 @@ def sync_actuals_from_feed():
                 )
                 outcome = lean_to_outcome(pred.lean_direction, was_correct)
                 stats   = learn_one(currency, features, outcome)
+                pred.weight_shift = stats.get("weight_shift_str")
+                db.commit()
 
                 log.info(
                     "learn_one [%s] event=%s outcome=%d correct=%s "
                     "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
-                    "n_trained: %d → %d  acc=%.1f%%",
+                    "n_trained: %d → %d  acc=%.1f%%  shift=%s",
                     currency, code, outcome, was_correct,
                     ind_score,
                     features.get("rate_diff_score", 0),
@@ -225,6 +236,7 @@ def sync_actuals_from_feed():
                     features.get("sentiment_score", 0),
                     n_before, stats.get("n_trained", 0),
                     (stats.get("live_accuracy") or 0) * 100,
+                    pred.weight_shift,
                 )
             except Exception as le:
                 log.warning("River learn_one failed for %s: %s", code, le)
@@ -462,7 +474,7 @@ def record_actual_api(payload: RecordActualPayload):
         pred.was_correct = was_correct
         db.commit()
 
-        # River learn_one — fires regardless of pre-release status
+        # River learn_one — strictly pre-release predictions only
         try:
             from learning import _registry
             n_before = _registry.get_n_trained(currency)
@@ -479,10 +491,13 @@ def record_actual_api(payload: RecordActualPayload):
             )
             outcome = lean_to_outcome(pred.lean_direction, was_correct)
             stats   = learn_one(currency, features, outcome)
+            pred.weight_shift = stats.get("weight_shift_str")
+            db.commit()
+
             log.info(
                 "learn_one [%s] event=%s outcome=%d correct=%s "
                 "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
-                "n_trained: %d → %d  acc=%.1f%%",
+                "n_trained: %d → %d  acc=%.1f%%  shift=%s",
                 currency, code, outcome, was_correct,
                 ind_score,
                 features.get("rate_diff_score", 0),
@@ -490,6 +505,7 @@ def record_actual_api(payload: RecordActualPayload):
                 features.get("sentiment_score", 0),
                 n_before, stats.get("n_trained", 0),
                 (stats.get("live_accuracy") or 0) * 100,
+                pred.weight_shift,
             )
         except Exception as le:
             log.warning("River learn_one failed for %s: %s", code, le)
@@ -570,6 +586,9 @@ def get_prediction(event_code: str, send_alert: bool = False):
     order_suggestions  = get_latest_suggestions(code)
 
     # Persist to DB
+    now_utc      = datetime.now(timezone.utc).replace(tzinfo=None)
+    is_late_flag = check_is_late(now_utc, release_time_utc)
+
     db   = SessionLocal()
     pred = PredictionModel(
         event_code          = code,
@@ -583,6 +602,7 @@ def get_prediction(event_code: str, send_alert: bool = False):
         currency            = currency,
         pair_signals        = json.dumps(pair_signals),
         model_version       = "river_arf_v1",
+        is_late             = is_late_flag,
     )
     db.add(pred)
     db.commit()
@@ -713,6 +733,7 @@ def get_historical_outcomes(limit: int = 30):
         .filter(
             PredictionModel.was_correct.isnot(None),
             PredictionModel.is_sample.is_(False),
+            PredictionModel.is_late.is_(False),
         )
         .order_by(PredictionModel.created_at.desc())
         .all()
@@ -749,6 +770,8 @@ def get_historical_outcomes(limit: int = 30):
                     .get(p.lean_direction, [])
                 ),
                 "date":            p.release_time_utc,
+                "is_late":         p.is_late,
+                "weight_shift":    p.weight_shift,
             }
             for p in graded
         ],
@@ -764,6 +787,7 @@ def get_overall_accuracy():
         .filter(
             PredictionModel.was_correct.isnot(None),
             PredictionModel.is_sample.is_(False),
+            PredictionModel.is_late.is_(False),
         )
         .all()
     )
@@ -1095,13 +1119,11 @@ def get_model_status():
         result.append({
             "currency":        ccy,
             "n_trained":       row.n_trained      if row else 0,
-            "n_real":          max(0, (row.n_trained or 0) - 10) if row else 0,  # subtract 10 seed samples
+            "n_real":          row.n_trained      if row else 0,
             "live_accuracy":   row.live_accuracy  if row else None,
             "feature_weights": fw,
             "last_updated":    row.updated_at.isoformat() if row and row.updated_at else None,
-            "status":          ("learning" if row and (row.n_trained or 0) > 10
-                                else "seeded_only" if row and (row.n_trained or 0) == 10
-                                else "untrained"),
+            "status":          ("learning" if row and (row.n_trained or 0) > 0 else "untrained"),
         })
     return {"currencies": result}
 
@@ -1110,59 +1132,52 @@ def get_model_status():
 def get_accuracy_trend():
     """
     Rolling accuracy over windows of 10 predictions per currency.
-    Shows whether hit-rate is improving as n_trained grows.
-    Returns windows oldest → newest so the frontend can plot a trend line.
+    USD-only — filters to USD predictions exclusively.
     """
     db = SessionLocal()
     try:
-        all_graded = (
+        candidates = (
             db.query(PredictionModel)
             .filter(
                 PredictionModel.was_correct.isnot(None),
                 PredictionModel.is_sample.is_(False),
+                PredictionModel.is_late.is_(False),
+                PredictionModel.currency == "USD",
             )
             .order_by(PredictionModel.created_at.asc())
             .all()
         )
+        all_graded = [p for p in candidates if is_pre_release_prediction(p)]
     finally:
         db.close()
-
-    # Group by currency
-    by_ccy: dict[str, list] = {}
-    for p in all_graded:
-        ccy = (p.currency or "USD").upper()
-        by_ccy.setdefault(ccy, []).append(p)
-
-    # Also compute an "all" aggregate
-    by_ccy["ALL"] = all_graded
 
     trend_data = []
     WINDOW = 10
 
-    for ccy, preds in by_ccy.items():
-        windows = []
-        for i in range(0, len(preds), WINDOW):
-            chunk = preds[i: i + WINDOW]
-            if len(chunk) < 2:
-                break
-            wins     = sum(1 for p in chunk if p.was_correct)
-            hit_rate = round(wins / len(chunk) * 100, 1)
-            windows.append({
-                "window_start": i + 1,
-                "window_end":   i + len(chunk),
-                "predictions":  len(chunk),
-                "wins":         wins,
-                "hit_rate_pct": hit_rate,
-                "date_from":    chunk[0].created_at.isoformat() if chunk[0].created_at else None,
-                "date_to":      chunk[-1].created_at.isoformat() if chunk[-1].created_at else None,
-            })
-        trend_data.append({
-            "currency":       ccy,
-            "total_graded":   len(preds),
-            "windows":        windows,
-            "improving":      (len(windows) >= 2 and
-                               windows[-1]["hit_rate_pct"] > windows[0]["hit_rate_pct"]),
+    windows = []
+    for i in range(0, len(all_graded), WINDOW):
+        chunk = all_graded[i: i + WINDOW]
+        if len(chunk) < 2:
+            break
+        wins     = sum(1 for p in chunk if p.was_correct)
+        hit_rate = round(wins / len(chunk) * 100, 1)
+        windows.append({
+            "window_start": i + 1,
+            "window_end":   i + len(chunk),
+            "predictions":  len(chunk),
+            "wins":         wins,
+            "hit_rate_pct": hit_rate,
+            "date_from":    chunk[0].created_at.isoformat() if chunk[0].created_at else None,
+            "date_to":      chunk[-1].created_at.isoformat() if chunk[-1].created_at else None,
         })
+
+    trend_data.append({
+        "currency":       "USD",
+        "total_graded":   len(all_graded),
+        "windows":        windows,
+        "improving":      (len(windows) >= 2 and
+                           windows[-1]["hit_rate_pct"] > windows[0]["hit_rate_pct"]),
+    })
 
     return {"trend": trend_data}
 
@@ -1189,10 +1204,13 @@ def get_calibration(currency: Optional[str] = None):
         query = db.query(PredictionModel).filter(
             PredictionModel.was_correct.isnot(None),
             PredictionModel.is_sample.is_(False),
+            PredictionModel.is_late.is_(False),
+            PredictionModel.currency == "USD",
         )
         if currency:
             query = query.filter(PredictionModel.currency == currency.upper())
-        preds = query.all()
+        candidates = query.all()
+        preds = [p for p in candidates if is_pre_release_prediction(p)]
     finally:
         db.close()
 
@@ -1225,7 +1243,8 @@ def get_calibration(currency: Optional[str] = None):
         wins             = b["wins"]
         actual_win_rate  = wins / total
         stated_midpoint  = b["stated_midpoint"]
-        flagged          = abs(actual_win_rate - stated_midpoint / 100) > 0.10
+        # Minimum 10 graded predictions per bucket before flagging
+        flagged          = (total >= 10) and (abs(actual_win_rate - stated_midpoint / 100) > 0.10)
         result.append({
             "bucket":          b["bucket"],
             "stated_midpoint": stated_midpoint,

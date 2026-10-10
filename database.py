@@ -18,6 +18,7 @@ Tables (new — multi-currency upgrade):
 
 import pickle
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, Integer, LargeBinary, String, Text,
@@ -74,6 +75,8 @@ class Prediction(Base):
     currency            = Column(String(3), nullable=True)   # USD / EUR / GBP …
     pair_signals        = Column(Text, nullable=True)        # JSON list of {pair, bias, confidence, order_level}
     model_version       = Column(String(20), nullable=True)  # "river_arf_v1" etc.
+    is_late             = Column(Boolean, nullable=False, default=False)
+    weight_shift        = Column(String(200), nullable=True)
 
 
 class Release(Base):
@@ -231,79 +234,47 @@ def init_db():
     Base.metadata.create_all(engine)
 
     with engine.begin() as conn:
-        # ── Predictions: legacy column additions ─────────────────────────────
+        # ── Predictions: column migrations ─────────────────────────────
         _add_column_if_missing(conn, "predictions", "is_sample",    "BOOLEAN NOT NULL DEFAULT 0")
-        # ── Predictions: new multi-currency columns ───────────────────────────
         _add_column_if_missing(conn, "predictions", "currency",     "VARCHAR(3)")
         _add_column_if_missing(conn, "predictions", "pair_signals",  "TEXT")
         _add_column_if_missing(conn, "predictions", "model_version", "VARCHAR(20)")
-
-    _mark_legacy_sample_history()
-
-
-# ── Legacy sample-data detection (unchanged from original) ───────────────────
-
-_SAMPLE_HISTORY_SIGNATURES = {
-    ("NFP",               "BEAT",   76.5, 165.0, 216.0,  True),
-    ("CPI",               "BEAT",   72.0,   3.1,   3.2,  True),
-    ("CORE_CPI",          "MISS",   64.0,   3.8,   3.7,  True),
-    ("PPI",               "BEAT",   68.0,   0.2,   0.3,  True),
-    ("JOBLESS_CLAIMS",    "MISS",   74.0, 222.0, 215.0,  True),
-    ("UNEMPLOYMENT_RATE", "INLINE", 52.0,   4.1,   4.2, False),
-    ("RETAIL_SALES",      "BEAT",   70.0,   0.3,   0.4,  True),
-    ("CONSUMER_CONFIDENCE","BEAT",  67.5,  99.0, 100.3,  True),
-}
+        _add_column_if_missing(conn, "predictions", "is_late",      "BOOLEAN NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "predictions", "weight_shift",  "VARCHAR(200)")
 
 
-def _mark_legacy_sample_history():
-    """Hide the complete legacy demo batch from accuracy stats without deleting it."""
-    db = SessionLocal()
-    try:
-        rows = db.query(Prediction).filter(Prediction.was_correct.is_not(None)).all()
-        signatures = {
-            (
-                row.event_code,
-                row.lean_direction,
-                row.confidence_pct,
-                row.forecast,
-                row.actual,
-                row.was_correct,
-            )
-            for row in rows
-        }
-        if not _SAMPLE_HISTORY_SIGNATURES.issubset(signatures):
-            return
-        for row in rows:
-            sig = (
-                row.event_code,
-                row.lean_direction,
-                row.confidence_pct,
-                row.forecast,
-                row.actual,
-                row.was_correct,
-            )
-            if sig in _SAMPLE_HISTORY_SIGNATURES:
-                row.is_sample = True
-        db.commit()
-    finally:
-        db.close()
+# ── Strict pre-release validation helpers ──────────────────────────────────────
 
-
-# ── Convenience helpers ───────────────────────────────────────────────────────
-
-def is_pre_release_prediction(prediction: Prediction) -> bool:
-    """Return True if the prediction was made before the release time."""
-    if not prediction.release_time_utc or not prediction.created_at:
+def check_is_late(created_at: Optional[datetime], release_time_utc: Optional[str]) -> bool:
+    """
+    Return True if the prediction was created at or after the release time.
+    Strict comparison in UTC.
+    """
+    if not release_time_utc or not created_at:
         return False
     try:
-        release_time = datetime.fromisoformat(
-            prediction.release_time_utc.replace("Z", "+00:00")
-        )
+        release_time = datetime.fromisoformat(release_time_utc.replace("Z", "+00:00"))
     except ValueError:
         return False
     if release_time.tzinfo is not None:
         release_time = release_time.astimezone(timezone.utc).replace(tzinfo=None)
-    return prediction.created_at < release_time
+    return created_at >= release_time
+
+
+def is_pre_release_prediction(prediction: Prediction) -> bool:
+    """
+    Return True only if the prediction was made strictly before release time,
+    is not marked late, and is not a sample.
+    Only pre-release predictions are allowed in hit-rate stats, the ledger,
+    and River learn_one() training.
+    """
+    if getattr(prediction, "is_sample", False):
+        return False
+    if getattr(prediction, "is_late", False):
+        return False
+    if not prediction.release_time_utc or not prediction.created_at:
+        return False
+    return not check_is_late(prediction.created_at, prediction.release_time_utc)
 
 
 def upsert_river_model(currency: str, model_obj, n_trained: int,

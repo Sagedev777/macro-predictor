@@ -5,8 +5,8 @@ scheduler.py — Background scheduler for pre-release alerts, post-release gradi
 
 Schedule summary:
   Every 1 min   — check_and_alert_upcoming()   (pre-release + post-release grading)
-  Every 24 hr   — refresh_rate_differentials()  (yield spreads for all 8 currencies)
-  Every 12 hr   — refresh_sentiment_cycle()     (GDELT + RSS + FinBERT for all 8)
+  Every 24 hr   — refresh_rate_differentials()  (USD yield spread)
+  Every 12 hr   — refresh_sentiment_cycle()     (GDELT + RSS + FinBERT for USD)
   Every 168 hr  — refresh_cot_cycle()           (CFTC COT, released Fridays)
   Every 24 hr   — refresh_currency_strengths()  (full feature vector + River predict)
 
@@ -31,6 +31,7 @@ from database import (
     AlertLog,
     Prediction as PredictionModel,
     SessionLocal,
+    check_is_late,
     is_pre_release_prediction,
 )
 from indicators import build_composite_score
@@ -45,10 +46,13 @@ scheduler: Optional[BackgroundScheduler] = None
 # GRADING LOGIC — preserved verbatim from original
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Extended inverse-indicator set covering all 8 currencies
+# Inverse-indicator set for USD events
 _INVERSE_EVENTS = {
     # USD
-    "JOBLESS_CLAIMS", "UNEMPLOYMENT_RATE",
+    "JOBLESS_CLAIMS",
+    "INITIAL_JOBLESS_CLAIMS",
+    "CONTINUING_JOBLESS_CLAIMS",
+    "UNEMPLOYMENT_RATE",
 }
 
 
@@ -247,6 +251,7 @@ def check_and_alert_upcoming():
 
                         if not existing:
                             direction = pred_result["lean_direction"]
+                            is_late_flag = check_is_late(now_utc, rel_str)
                             db.add(PredictionModel(
                                 created_at          = now_utc,
                                 event_code          = code,
@@ -261,6 +266,7 @@ def check_and_alert_upcoming():
                                 currency            = currency,
                                 pair_signals        = json.dumps(pair_signals),
                                 model_version       = "river_arf_v1",
+                                is_late             = is_late_flag,
                             ))
                             db.commit()
 
@@ -305,66 +311,77 @@ def check_and_alert_upcoming():
                 )
 
                 if recent_pred:
-                    surprise = round(actual - forecast, 4)
-                    lean     = recent_pred.lean_direction
-                    was_correct, verdict_msg = grade_prediction(code, lean, actual, forecast)
-
-                    recent_pred.was_correct     = was_correct
-                    recent_pred.actual          = actual
-                    recent_pred.forecast        = forecast
-                    recent_pred.surprise        = surprise
-                    recent_pred.actual_surprise = surprise
-                    db.commit()
-
-                    # ── River learn_one() — fires on ALL graded predictions ────
-                    # is_pre_release_prediction only gates accuracy DISPLAY,
-                    # not training — every real outcome is valid training data.
-                    new_confidence = recent_pred.confidence_pct or 50.0
-                    n_after        = 0
-                    n_before       = 0
-                    try:
-                        rd   = get_rate_differential(currency)
-                        cot  = get_latest_cot(currency)
-                        sent = get_latest_sentiment(currency)
-
-                        n_before = _registry_n_trained(currency)
-                        features = build_features(
-                            indicator_score = float(recent_pred.composite_score or 0.0),
-                            rate_diff_score = rate_diff_to_score(rd),
-                            cot_score       = cot_to_score(cot),
-                            sentiment_score = sentiment_to_score(sent),
-                        )
-                        outcome = lean_to_outcome(lean, was_correct)
-                        stats   = learn_one(currency, features, outcome)
-                        n_after = stats.get("n_trained", 0)
-
+                    # Data-integrity rule: only pre-release predictions count
+                    # toward accuracy, ledger, and River training.
+                    if not is_pre_release_prediction(recent_pred):
                         log.info(
-                            "learn_one [%s] event=%s outcome=%d correct=%s "
-                            "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
-                            "n_trained: %d → %d  acc=%.1f%%",
-                            currency, code, outcome, was_correct,
-                            features.get("indicator_score", 0),
-                            features.get("rate_diff_score", 0),
-                            features.get("cot_score", 0),
-                            features.get("sentiment_score", 0),
-                            n_before, n_after,
-                            (stats.get("live_accuracy") or 0) * 100,
+                            "Skipping grading & River training for %s (id=%s): post-release/late prediction (is_late=%s)",
+                            code, recent_pred.id, recent_pred.is_late
                         )
+                    else:
+                        surprise = round(actual - forecast, 4)
+                        lean     = recent_pred.lean_direction
+                        was_correct, verdict_msg = grade_prediction(code, lean, actual, forecast)
 
-                        # Refresh currency strength snapshot after learning
-                        pred_strength = predict_strength(currency, features)
-                        new_confidence = pred_strength.confidence_pct
-                        persist_currency_strength(
-                            currency        = currency,
-                            strength_score  = pred_strength.strength_score,
-                            indicator_score = float(recent_pred.composite_score or 0.0),
-                            rate_diff_score = rate_diff_to_score(rd),
-                            cot_score       = cot_to_score(cot),
-                            sentiment_score = sentiment_to_score(sent),
-                            confidence_pct  = pred_strength.confidence_pct,
-                        )
-                    except Exception as le:
-                        log.warning("River learn_one failed for %s/%s: %s", code, currency, le)
+                        recent_pred.was_correct     = was_correct
+                        recent_pred.actual          = actual
+                        recent_pred.forecast        = forecast
+                        recent_pred.surprise        = surprise
+                        recent_pred.actual_surprise = surprise
+                        db.commit()
+
+                        # ── River learn_one() — strictly pre-release predictions only ──
+                        new_confidence = recent_pred.confidence_pct or 50.0
+                        n_after        = 0
+                        n_before       = 0
+                        try:
+                            rd   = get_rate_differential(currency)
+                            cot  = get_latest_cot(currency)
+                            sent = get_latest_sentiment(currency)
+
+                            n_before = _registry_n_trained(currency)
+                            features = build_features(
+                                indicator_score = float(recent_pred.composite_score or 0.0),
+                                rate_diff_score = rate_diff_to_score(rd),
+                                cot_score       = cot_to_score(cot),
+                                sentiment_score = sentiment_to_score(sent),
+                            )
+                            outcome = lean_to_outcome(lean, was_correct)
+                            stats   = learn_one(currency, features, outcome)
+                            n_after = stats.get("n_trained", 0)
+
+                            # Persist actual weight shift to the prediction row
+                            recent_pred.weight_shift = stats.get("weight_shift_str")
+                            db.commit()
+
+                            log.info(
+                                "learn_one [%s] event=%s outcome=%d correct=%s "
+                                "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
+                                "n_trained: %d → %d  acc=%.1f%%  shift=%s",
+                                currency, code, outcome, was_correct,
+                                features.get("indicator_score", 0),
+                                features.get("rate_diff_score", 0),
+                                features.get("cot_score", 0),
+                                features.get("sentiment_score", 0),
+                                n_before, n_after,
+                                (stats.get("live_accuracy") or 0) * 100,
+                                recent_pred.weight_shift,
+                            )
+
+                            # Refresh currency strength snapshot after learning
+                            pred_strength = predict_strength(currency, features)
+                            new_confidence = pred_strength.confidence_pct
+                            persist_currency_strength(
+                                currency        = currency,
+                                strength_score  = pred_strength.strength_score,
+                                indicator_score = float(recent_pred.composite_score or 0.0),
+                                rate_diff_score = rate_diff_to_score(rd),
+                                cot_score       = cot_to_score(cot),
+                                sentiment_score = sentiment_to_score(sent),
+                                confidence_pct  = pred_strength.confidence_pct,
+                            )
+                        except Exception as le:
+                            log.warning("River learn_one failed for %s/%s: %s", code, currency, le)
 
                     # ── Post-release Telegram alert ───────────────────────────
                     post_sent = db.query(AlertLog).filter(
@@ -383,6 +400,7 @@ def check_and_alert_upcoming():
                                     PredictionModel.currency    == currency,
                                     PredictionModel.was_correct.isnot(None),
                                     PredictionModel.is_sample.is_(False),
+                                    PredictionModel.is_late.is_(False),
                                     PredictionModel.created_at  >= _month_start,
                                 )
                                 .all()
@@ -424,8 +442,8 @@ def check_and_alert_upcoming():
 
 def refresh_rate_differentials():
     """
-    Fetch benchmark yields for all 8 currencies and compute rate differentials.
-    Runs daily at 06:00 UTC (configured in start_scheduler).
+    Fetch US Treasury yields and compute the USD rate differential.
+    Runs daily at 06:00 UTC.
     """
     try:
         from data_sources import compute_rate_differentials
@@ -444,9 +462,8 @@ def refresh_rate_differentials():
 
 def refresh_sentiment_cycle():
     """
-    Pull GDELT + RSS articles and run FinBERT for all 8 currencies.
-    Runs every 12 hours.  FinBERT model is lazy-loaded — first run will
-    download weights if not yet cached by HuggingFace.
+    Pull GDELT + RSS articles and run FinBERT for USD sentiment.
+    Runs every 12 hours.
     """
     try:
         from sentiment import refresh_all_sentiment
@@ -488,8 +505,8 @@ def refresh_cot_cycle():
 
 def refresh_currency_strengths():
     """
-    Build the full 4-feature vector for all 8 currencies and run River ARF
-    predictions.  Persists currency strength snapshots to the DB.
+    Build the full 4-feature vector for USD and run River ARF prediction.
+    Persists USD strength snapshot to the DB.
     Runs daily at 07:00 UTC (after rate-differential refresh at 06:00).
     """
     try:

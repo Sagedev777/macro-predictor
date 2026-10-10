@@ -1,6 +1,6 @@
 """
-events.py — Event definitions, leading indicator weights, currency metadata,
-and pair-routing logic for the multi-currency strength architecture.
+events.py — Event definitions, leading indicator weights, and pair-routing
+logic for the USD-only strength architecture.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SIGN CONVENTION (per-currency indicators)
@@ -114,6 +114,64 @@ EVENTS = {
         ],
     },
 
+    "CPI_MM": {
+        "display_name": "CPI m/m",
+        "currency": "USD",
+        "impact": "red",
+        "history_series": "CPIAUCSL",
+        "event_labels": {
+            "BULLISH": "HOT PRINT (Sticky Inflation m/m)",
+            "BEARISH": "COOL PRINT (Disinflation m/m)",
+            "INLINE": "INLINE (Expected)",
+        },
+        "explanations": {
+            "BULLISH": "Energy, commodity, and services pipeline inflation lean elevated m/m. Hot monthly CPI reinforces hawkish Fed policy, supporting USD upside.",
+            "BEARISH": "Leading monthly price indicators indicate easing pressure. Soft CPI increases Fed rate cut expectations, weakening USD.",
+            "INLINE": "Monthly inflation signals are balanced. Market likely to react strictly to the decimal surprise against consensus.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / RANGE BOUND"],
+        },
+        "indicators": [
+            ("GASREGCOVW",     0.25, +1, "Weekly US Retail Gasoline — primary energy CPI driver"),
+            ("MHHNGSP",        0.15, +1, "Henry Hub Natural Gas — utility bills component"),
+            ("PPIFES",         0.20, +1, "PPI Final Demand Services — services sticky inflation"),
+            ("PPIACO",         0.25, +1, "PPI All Commodities — producer input costs passed to CPI"),
+            ("CUSR0000SETB01", 0.15, +1, "CPI Used Cars & Trucks — secondary goods component"),
+        ],
+    },
+
+    "CPI_YY": {
+        "display_name": "CPI y/y",
+        "currency": "USD",
+        "impact": "red",
+        "history_series": "CPIAUCSL",
+        "event_labels": {
+            "BULLISH": "HOT PRINT (Sticky Inflation y/y)",
+            "BEARISH": "COOL PRINT (Disinflation y/y)",
+            "INLINE": "INLINE (Expected)",
+        },
+        "explanations": {
+            "BULLISH": "Annualized energy, commodity, and services inflation lean elevated y/y. Hot headline CPI reinforces hawkish Fed policy, supporting USD upside.",
+            "BEARISH": "Annualized price indicators indicate continuing disinflation y/y. Soft CPI accelerates Fed easing bets, weakening USD.",
+            "INLINE": "Annual inflation signals are balanced with consensus. Market reacts strictly to deviation.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / RANGE BOUND"],
+        },
+        "indicators": [
+            ("GASREGCOVW",     0.25, +1, "Weekly US Retail Gasoline — primary energy CPI driver"),
+            ("MHHNGSP",        0.15, +1, "Henry Hub Natural Gas — utility bills component"),
+            ("PPIFES",         0.20, +1, "PPI Final Demand Services — services sticky inflation"),
+            ("PPIACO",         0.25, +1, "PPI All Commodities — producer input costs passed to CPI"),
+            ("CUSR0000SETB01", 0.15, +1, "CPI Used Cars & Trucks — secondary goods component"),
+        ],
+    },
+
     "CPI": {
         "display_name": "Consumer Price Index (CPI)",
         "currency": "USD",
@@ -140,6 +198,64 @@ EVENTS = {
             ("PPIFES",         0.20, +1, "PPI Final Demand Services — services sticky inflation"),
             ("PPIACO",         0.25, +1, "PPI All Commodities — producer input costs passed to CPI"),
             ("CUSR0000SETB01", 0.15, +1, "CPI Used Cars & Trucks — secondary goods component"),
+        ],
+    },
+
+    "CORE_CPI_MM": {
+        "display_name": "Core CPI m/m",
+        "currency": "USD",
+        "impact": "red",
+        "history_series": "CPILFESL",
+        "event_labels": {
+            "BULLISH": "HOT CORE (Services Stickiness m/m)",
+            "BEARISH": "COOL CORE (Disinflationary m/m)",
+            "INLINE": "INLINE (Neutral)",
+        },
+        "explanations": {
+            "BULLISH": "Shelter and services pipeline metrics remain firm m/m. Persistent core inflation strengthens the US Dollar as rate cuts are pushed back.",
+            "BEARISH": "Core components indicate cooling shelter and services momentum m/m. Disinflation supports risk assets while weighing on the USD.",
+            "INLINE": "Core metrics are aligned with market consensus m/m.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("CUSR0000SEHA",  0.30, +1, "CPI Rent of Primary Residence — ~34% of core basket"),
+            ("CUSR0000SEHC",  0.25, +1, "CPI Owner's Equivalent Rent (OER)"),
+            ("PPIFES",        0.20, +1, "PPI Final Demand Services — services price pressures"),
+            ("PPIFIS",        0.15, +1, "PPI Final Demand — pipeline pricing pressure"),
+            ("PPIACO",        0.10, +1, "PPI All Commodities — feeds goods inflation"),
+        ],
+    },
+
+    "CORE_CPI_YY": {
+        "display_name": "Core CPI y/y",
+        "currency": "USD",
+        "impact": "red",
+        "history_series": "CPILFESL",
+        "event_labels": {
+            "BULLISH": "HOT CORE (Services Stickiness y/y)",
+            "BEARISH": "COOL CORE (Disinflationary y/y)",
+            "INLINE": "INLINE (Neutral)",
+        },
+        "explanations": {
+            "BULLISH": "Shelter and services pipeline metrics remain firm y/y. Persistent annualized core inflation strengthens the US Dollar.",
+            "BEARISH": "Annual core metrics indicate sustained shelter disinflation y/y, reducing USD support.",
+            "INLINE": "Annual core metrics are aligned with market consensus.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("CUSR0000SEHA",  0.30, +1, "CPI Rent of Primary Residence — ~34% of core basket"),
+            ("CUSR0000SEHC",  0.25, +1, "CPI Owner's Equivalent Rent (OER)"),
+            ("PPIFES",        0.20, +1, "PPI Final Demand Services — services price pressures"),
+            ("PPIFIS",        0.15, +1, "PPI Final Demand — pipeline pricing pressure"),
+            ("PPIACO",        0.10, +1, "PPI All Commodities — feeds goods inflation"),
         ],
     },
 
@@ -198,6 +314,60 @@ EVENTS = {
             ("PPIFES",      0.20, +1, "PPI Final Demand Services — service-sector costs"),
             ("MANEMP",      0.15, +1, "ISM Mfg Employment — capacity utilization proxy"),
             ("PPICRM",      0.15, +1, "PPI Crude Materials — raw material pipeline"),
+        ],
+    },
+
+    "INITIAL_JOBLESS_CLAIMS": {
+        "display_name": "Initial Jobless Claims",
+        "currency": "USD",
+        "impact": "red",
+        "history_series": "ICSA",
+        "event_labels": {
+            "BULLISH": "FEWER CLAIMS (Resilient Labor)",
+            "BEARISH": "HIGHER CLAIMS (Labor Weakness)",
+            "INLINE": "INLINE (Stable Claims)",
+        },
+        "explanations": {
+            "BULLISH": "Initial claims trends remain muted. Low claims demonstrate labor market resilience, supporting USD strength.",
+            "BEARISH": "Rising initial claims point to labor softening. Higher claims accelerate rate-cut bets, weakening the USD.",
+            "INLINE": "Initial claims are tracking consensus. No immediate directional bias.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("IC4WSA",  0.40, -1, "4-Week Claims Moving Average — falling claims = bullish USD"),
+            ("CCSA",    0.35, -1, "Continued Claims — lower continuing claims = strong labor"),
+            ("JTSLDL",  0.25, -1, "Layoffs & Discharges — low layoffs = resilient economy"),
+        ],
+    },
+
+    "CONTINUING_JOBLESS_CLAIMS": {
+        "display_name": "Continuing Jobless Claims",
+        "currency": "USD",
+        "impact": "red",
+        "history_series": "CCSA",
+        "event_labels": {
+            "BULLISH": "FEWER CONTINUING CLAIMS (Tight Labor)",
+            "BEARISH": "HIGHER CONTINUING CLAIMS (Harder To Find Work)",
+            "INLINE": "INLINE (Stable Claims)",
+        },
+        "explanations": {
+            "BULLISH": "Continuing claims drop shows unemployed workers quickly finding new employment. Bullish USD.",
+            "BEARISH": "Continuing claims rise indicates extended duration of unemployment. Bearish USD.",
+            "INLINE": "Continuing claims meet expectations. Neutral impact.",
+        },
+        "trade_signals": {
+            "BULLISH": ["BUY USDJPY", "BUY USDCHF", "BUY USDCAD", "SELL EURUSD", "SELL GBPUSD", "SELL AUDUSD", "SELL XAUUSD"],
+            "BEARISH": ["SELL USDJPY", "SELL USDCHF", "SELL USDCAD", "BUY EURUSD", "BUY GBPUSD", "BUY AUDUSD", "BUY XAUUSD"],
+            "INLINE": ["WAIT / NO BIAS"],
+        },
+        "indicators": [
+            ("CCSA",    0.50, -1, "Continued Claims — lower continuing claims = strong labor"),
+            ("IC4WSA",  0.30, -1, "4-Week Claims Moving Average — falling claims = bullish USD"),
+            ("UEMPMEAN", 0.20, -1, "Average Weeks Unemployed — lower duration = tight labor"),
         ],
     },
 

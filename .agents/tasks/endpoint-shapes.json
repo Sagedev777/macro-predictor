@@ -1,0 +1,255 @@
+{
+  "/api/model-status": {
+    "currencies": [
+      {
+        "currency": "USD",
+        "n_trained": 15,
+        "n_real": 5,
+        "live_accuracy": 1.0,
+        "feature_weights": {
+          "indicator_score": 0.25,
+          "rate_diff_score": 0.25,
+          "cot_score": 0.25,
+          "sentiment_score": 0.25
+        },
+        "last_updated": "2026-10-03T10:42:09.784958",
+        "status": "learning"
+      },
+      {
+        "currency": "EUR",
+        "n_trained": 12,
+        "n_real": 2,
+        "live_accuracy": 1.0,
+        "feature_weights": {
+          "indicator_score": 0.25,
+          "rate_diff_score": 0.25,
+          "cot_score": 0.25,
+          "sentiment_score": 0.25
+        },
+        "last_updated": "2026-10-03T10:45:41.316544",
+        "status": "learning"
+      },
+      {
+        "currency": "GBP",
+        "n_trained": 10,
+        "n_real": 0,
+        "live_accuracy": null,
+        "feature_weights": {
+          "indicator_score": 0.25,
+          "rate_diff_score": 0.25,
+          "cot_score": 0.25,
+          "sentiment_score": 0.25
+        },
+        "last_updated": "2026-10-02T10:11:48.876861",
+        "status": "seeded_only"
+      },
+      {
+        "currency": "JPY",
+        "n_trained": 10,
+        "n_real": 0,
+        "live_accuracy": null,
+        "feature_weights": {
+          "indicator_score": 0.25,
+          "rate_diff_score": 0.25,
+          "cot_score": 0.25,
+          "sentiment_score": 0.25
+        },
+        "last_updated": "2026-10-02T10:11:48.901077",
+        "status": "seeded_only"
+      },
+      {
+        "currency": "AUD",
+        "n_trained": 13,
+        "n_real": 3,
+        "live_accuracy": 1.0,
+        "feature_weights": {
+          "indicator_score": 0.25,
+          "rate_diff_score": 0.25,
+          "cot_score": 0.25,
+          "sentiment_score": 0.25
+        },
+        "last_updated": "2026-10-03T10:45:41.259974",
+        "status": "learning"
+      },
+      {
+        "currency": "CHF",
+        "n_trained": 10,
+        "n_real": 0,
+        "live_accuracy": null,
+        "feature_weights": {
+          "indicator_score": 0.25,
+          "rate_diff_score": 0.25,
+          "cot_score": 0.25,
+          "sentiment_score": 0.25
+        },
+        "last_updated": "2026-10-02T10:11:48.947491",
+        "status": "seeded_only"
+      },
+      {
+        "currency": "CAD",
+        "n_trained": 10,
+        "n_real": 0,
+        "live_accuracy": null,
+        "feature_weights": {
+          "indicator_score": 0.25,
+          "rate_diff_score": 0.25,
+          "cot_score": 0.25,
+          "sentiment_score": 0.25
+        },
+        "last_updated": "2026-10-02T10:11:48.985320",
+        "status": "seeded_only"
+      },
+      {
+        "currency": "NZD",
+        "n_trained": 10,
+        "n_real": 0,
+        "live_accuracy": null,
+        "feature_weights": {
+          "indicator_score": 0.25,
+          "rate_diff_score": 0.25,
+          "cot_score": 0.25,
+          "sentiment_score": 0.25
+        },
+        "last_updated": "2026-10-02T10:11:49.028353",
+        "status": "seeded_only"
+      }
+    ]
+  },
+  "/api/accuracy-trend": {
+    "trend": [
+      {
+        "currency": "USD",
+        "total_graded": 5,
+        "windows": [
+          {
+            "window_start": 1,
+            "window_end": 5,
+            "predictions": 5,
+            "wins": 1,
+            "hit_rate_pct": 20.0,
+            "date_from": "2026-10-02T10:01:57.627413",
+            "date_to": "2026-10-02T10:19:26.934825"
+          }
+        ],
+        "improving": false
+      },
+      {
+        "currency": "AUD",
+        "total_graded": 3,
+        "windows": [
+          {
+            "window_start": 1,
+            "window_end": 3,
+            "predictions": 3,
+            "wins": 0,
+            "hit_rate_pct": 0.0,
+            "date_from": "2026-10-02T10:19:16.519353",
+            "date_to": "2026-10-03T08:20:38.781465"
+          }
+        ],
+        "improving": false
+      },
+      {
+        "currency": "EUR",
+        "total_graded": 2,
+        "windows": [
+          {
+            "window_start": 1,
+            "window_end": 2,
+            "predictions": 2,
+            "wins": 0,
+            "hit_rate_pct": 0.0,
+            "date_from": "2026-10-02T10:28:38.962497",
+            "date_to": "2026-10-02T15:36:09.213406"
+          }
+        ],
+        "improving": false
+      },
+      {
+        "currency": "ALL",
+        "total_graded": 10,
+        "windows": [
+          {
+            "window_start": 1,
+            "window_end": 10,
+            "predictions": 10,
+            "wins": 1,
+            "hit_rate_pct": 10.0,
+            "date_from": "2026-10-02T10:01:57.627413",
+            "date_to": "2026-10-03T08:20:38.781465"
+          }
+        ],
+        "improving": false
+      }
+    ]
+  },
+  "/api/calibration": [
+    {
+      "bucket": "<60%",
+      "stated_midpoint": 55,
+      "actual_win_rate": 0.0,
+      "count": 2,
+      "flagged": true
+    },
+    {
+      "bucket": ">80%",
+      "stated_midpoint": 85,
+      "actual_win_rate": 0.125,
+      "count": 8,
+      "flagged": true
+    }
+  ],
+  "/api/history?limit=60": {
+    "total_graded": 3,
+    "wins": 0,
+    "losses": 3,
+    "hit_rate_pct": 0.0,
+    "history": [
+      {
+        "id": 1,
+        "event_code": "AVG_HOURLY_EARNINGS",
+        "display_name": "Average Hourly Earnings m/m",
+        "currency": "USD",
+        "lean_direction": "BEAT",
+        "confidence_pct": 85.0,
+        "composite_score": 0.7,
+        "forecast": 0.3,
+        "actual": 0.1,
+        "surprise": -0.2,
+        "was_correct": false,
+        "trade_signals": [],
+        "date": "2026-10-02T08:30:00-04:00"
+      },
+      {
+        "id": 2,
+        "event_code": "NFP",
+        "display_name": "Non-Farm Payrolls",
+        "currency": "USD",
+        "lean_direction": "BEAT",
+        "confidence_pct": 85.0,
+        "composite_score": 0.75,
+        "forecast": 89.0,
+        "actual": 29.0,
+        "surprise": -60.0,
+        "was_correct": false,
+        "trade_signals": [],
+        "date": "2026-10-02T08:30:00-04:00"
+      },
+      {
+        "id": 3,
+        "event_code": "UNEMPLOYMENT_RATE",
+        "display_name": "Unemployment Rate (U3)",
+        "currency": "USD",
+        "lean_direction": "BEAT",
+        "confidence_pct": 85.0,
+        "composite_score": 0.6,
+        "forecast": 4.1,
+        "actual": 4.2,
+        "surprise": 0.1,
+        "was_correct": false,
+        "trade_signals": [],
+        "date": "2026-10-02T08:30:00-04:00"
+      }
+    ]
+  }
+}
