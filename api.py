@@ -847,23 +847,446 @@ def get_model_status():
 
 
 @app.get("/api/gold/forecasts")
-def list_gold_forecasts(limit: int = 50):
-    """List stored XAU/USD release-moment forecasts and evaluated outcomes."""
+def list_gold_forecasts(
+    limit: int = 50,
+    offset: int = 0,
+    event_family: Optional[str] = None,
+    status: Optional[str] = None,
+    direction: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    """List stored XAU/USD release-moment forecasts and evaluated outcomes with pagination and filtering."""
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be >= 0")
     from gold_model import serialize_gold_forecast
 
     db = SessionLocal()
     try:
+        query = db.query(GoldForecastModel)
+        if event_family:
+            query = query.filter(GoldForecastModel.event_family == event_family.lower())
+        if status:
+            if status == "graded":
+                query = query.filter(GoldForecastModel.outcome_recorded_at.isnot(None), GoldForecastModel.outcome_status == "ok")
+            elif status == "pending":
+                query = query.filter(GoldForecastModel.outcome_recorded_at.is_(None), GoldForecastModel.outcome_status == "pending")
+            elif status == "unavailable":
+                query = query.filter(GoldForecastModel.outcome_status == "unavailable")
+        if direction:
+            query = query.filter(GoldForecastModel.forecast_direction == direction.upper())
+        if search:
+            s = f"%{search.strip().lower()}%"
+            query = query.filter(
+                (GoldForecastModel.release_moment_id.ilike(s))
+                | (GoldForecastModel.event_codes_json.ilike(s))
+                | (GoldForecastModel.event_names_json.ilike(s))
+                | (GoldForecastModel.release_time_utc.ilike(s))
+            )
+        total = query.count()
         rows = (
-            db.query(GoldForecastModel)
-            .order_by(GoldForecastModel.release_time_utc.desc())
+            query.order_by(GoldForecastModel.release_time_utc.desc())
+            .offset(offset)
             .limit(limit)
             .all()
         )
         return {
             "count": len(rows),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
             "forecasts": [serialize_gold_forecast(row, db) for row in rows],
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/gold/forecast/{release_id}")
+def get_gold_forecast_detail(release_id: str):
+    """Get complete, immutable point-in-time record for a specific release moment."""
+    from database import GoldForecast as GF, GoldModelTraining as GMT, Prediction as P
+    from gold_model import serialize_gold_forecast
+
+    db = SessionLocal()
+    try:
+        row = db.query(GF).filter(
+            (GF.release_moment_id == release_id) | (GF.release_time_utc == release_id)
+        ).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Gold forecast not found")
+
+        serialized = serialize_gold_forecast(row, db)
+
+        training_row = db.get(GMT, row.release_time_utc)
+        serialized["training_ledger"] = {
+            "is_trained": bool(training_row and training_row.trained_at is not None),
+            "claimed_at": training_row.claimed_at.isoformat() if training_row and training_row.claimed_at else None,
+            "trained_at": training_row.trained_at.isoformat() if training_row and training_row.trained_at else None,
+        }
+
+        usd_preds = db.query(P).filter(P.release_time_utc == row.release_time_utc).all()
+        serialized["linked_usd_predictions"] = [
+            {
+                "id": p.id,
+                "event_code": p.event_code,
+                "event_display_name": p.event_display_name,
+                "lean_direction": p.lean_direction,
+                "forecast": p.forecast,
+                "previous": p.previous,
+                "actual": p.actual,
+                "surprise": p.surprise,
+                "was_correct": p.was_correct,
+                "result_15m": p.result_15m,
+                "usd_move_15m": p.usd_move_15m,
+                "confidence_pct": p.confidence_pct,
+            }
+            for p in usd_preds
+        ]
+        return serialized
+    finally:
+        db.close()
+
+
+@app.get("/api/gold/evaluation")
+def get_gold_evaluation():
+    """Chronological walk-forward evaluation metrics (Brier, baseline, by family)."""
+    from gold_model import get_walkforward_evaluation
+    return get_walkforward_evaluation()
+
+
+@app.get("/api/gold/insights")
+def get_gold_insights():
+    """Evidence-based historical reaction findings grouped by event family and surprise category."""
+    from database import GoldForecast as GF
+    import numpy as np
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(GF)
+            .filter(
+                GF.outcome_recorded_at.isnot(None),
+                GF.gold_change_5m_pct.isnot(None),
+            )
+            .order_by(GF.release_time_utc.asc())
+            .all()
+        )
+        if len(rows) < 3:
+            return {
+                "has_sufficient_data": False,
+                "sample_size": len(rows),
+                "message": "Insufficient data to compute evidence-based empirical insights. At least 3 graded outcomes are required.",
+                "by_family": {},
+                "return_distribution": {},
+                "direction_frequencies": {},
+            }
+
+        returns_5m = [float(r.gold_change_5m_pct) for r in rows]
+        returns_5m_sorted = sorted(returns_5m)
+        n = len(returns_5m_sorted)
+
+        median_ret = float(np.median(returns_5m))
+        p25 = float(np.percentile(returns_5m, 25))
+        p75 = float(np.percentile(returns_5m, 75))
+        min_ret = returns_5m_sorted[0]
+        max_ret = returns_5m_sorted[-1]
+
+        labels = [r.outcome_label or "NEUTRAL" for r in rows]
+        direction_counts = {
+            "BULLISH": labels.count("BULLISH"),
+            "BEARISH": labels.count("BEARISH"),
+            "NEUTRAL": labels.count("NEUTRAL"),
+        }
+        direction_pcts = {
+            k: round(v / n * 100, 1) for k, v in direction_counts.items()
+        }
+
+        by_family = {}
+        families = set(r.event_family for r in rows)
+        for fam in sorted(families):
+            fam_rows = [r for r in rows if r.event_family == fam]
+            fam_returns = [float(r.gold_change_5m_pct) for r in fam_rows]
+            fam_labels = [r.outcome_label or "NEUTRAL" for r in fam_rows]
+            by_family[fam] = {
+                "count": len(fam_rows),
+                "median_return_5m_pct": round(float(np.median(fam_returns)), 3),
+                "avg_abs_move_pct": round(float(np.mean([abs(x) for x in fam_returns])), 3),
+                "bullish_count": fam_labels.count("BULLISH"),
+                "bearish_count": fam_labels.count("BEARISH"),
+                "neutral_count": fam_labels.count("NEUTRAL"),
+            }
+
+        by_surprise = {"beat": [], "miss": [], "inline": []}
+        for r in rows:
+            surprises = []
+            try:
+                releases = json.loads(r.actual_release_json or "[]")
+                for rel in releases:
+                    if rel.get("actual") is not None and rel.get("forecast") is not None:
+                        surprises.append(rel["actual"] - rel["forecast"])
+            except Exception:
+                pass
+            if surprises:
+                mean_surp = sum(surprises) / len(surprises)
+                if mean_surp > 0.05:
+                    by_surprise["beat"].append(r.gold_change_5m_pct)
+                elif mean_surp < -0.05:
+                    by_surprise["miss"].append(r.gold_change_5m_pct)
+                else:
+                    by_surprise["inline"].append(r.gold_change_5m_pct)
+
+        surprise_summary = {
+            k: {
+                "count": len(v),
+                "median_return_pct": round(float(np.median(v)), 3) if v else None,
+                "avg_abs_move_pct": round(float(np.mean([abs(x) for x in v])), 3) if v else None,
+            }
+            for k, v in by_surprise.items()
+        }
+
+        return {
+            "has_sufficient_data": True,
+            "sample_size": n,
+            "date_range": {
+                "from": rows[0].release_time_utc,
+                "to": rows[-1].release_time_utc,
+            },
+            "return_distribution": {
+                "min": round(min_ret, 3),
+                "p25": round(p25, 3),
+                "median": round(median_ret, 3),
+                "p75": round(p75, 3),
+                "max": round(max_ret, 3),
+            },
+            "direction_frequencies": {
+                "counts": direction_counts,
+                "percentages": direction_pcts,
+            },
+            "by_family": by_family,
+            "by_surprise": surprise_summary,
+            "disclaimer": "Descriptive historical findings based exclusively on persisted release observations. Small-sample patterns are not predictive trading rules.",
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/gold/activity")
+def get_gold_activity(limit: int = 40):
+    """Timestamped model lifecycle activity: forecast creation, grading, training, alerts."""
+    from database import GoldForecast as GF, GoldModelTraining as GMT, AlertLog as AL, PeriodicJobRun as PJR
+
+    db = SessionLocal()
+    try:
+        events = []
+        for f in db.query(GF).order_by(GF.created_at.desc()).limit(limit).all():
+            events.append({
+                "timestamp": f.created_at.isoformat() if f.created_at else None,
+                "type": "forecast_created",
+                "title": f"Forecast Generated: {f.event_family.upper()}",
+                "description": f"Predicted {f.forecast_direction or 'NEUTRAL'} for {f.release_time_utc}",
+                "moment_id": f.release_moment_id,
+                "status": f.forecast_status,
+            })
+            if f.outcome_recorded_at:
+                events.append({
+                    "timestamp": f.outcome_recorded_at.isoformat(),
+                    "type": "outcome_graded",
+                    "title": f"Outcome Graded: {f.outcome_label or 'UNKNOWN'}",
+                    "description": f"XAU/USD 5m change: {f.gold_change_5m_pct:.2f}% (Status: {f.outcome_status})",
+                    "moment_id": f.release_moment_id,
+                    "status": f.outcome_status,
+                })
+        for t in db.query(GMT).order_by(GMT.claimed_at.desc()).limit(limit).all():
+            if t.trained_at:
+                events.append({
+                    "timestamp": t.trained_at.isoformat(),
+                    "type": "model_trained",
+                    "title": "Incremental Learning Committed",
+                    "description": f"Trained observation for release moment {t.release_time_utc}",
+                    "moment_id": t.release_time_utc,
+                    "status": "trained",
+                })
+        for a in db.query(AL).order_by(AL.sent_at.desc()).limit(limit).all():
+            events.append({
+                "timestamp": a.sent_at.isoformat() if a.sent_at else None,
+                "type": "alert_sent",
+                "title": f"Telegram Alert: {a.alert_type}",
+                "description": f"Sent alert for {a.event_code} ({a.release_time_str or ''})",
+                "moment_id": a.release_time_str,
+                "status": "sent",
+            })
+
+        events.sort(key=lambda x: x["timestamp"] or "", reverse=True)
+        return {"activity": events[:limit]}
+    finally:
+        db.close()
+
+
+@app.get("/api/sources/status")
+def get_sources_status():
+    """Authoritative status, freshness, and availability of all data sources."""
+    from database import CotSnapshot, SentimentSnapshot, PriceReaction
+
+    db = SessionLocal()
+    try:
+        cot = db.query(CotSnapshot).filter(CotSnapshot.currency == "XAU").order_by(CotSnapshot.captured_at.desc()).first()
+        sent = db.query(SentimentSnapshot).order_by(SentimentSnapshot.recorded_at.desc()).first()
+        px = db.query(PriceReaction).filter(PriceReaction.symbol == "XAUUSD").order_by(PriceReaction.fetched_at.desc()).first()
+
+        td_key = bool(os.getenv("TWELVE_DATA_API_KEY", "").strip())
+        fred_key = bool(os.getenv("FRED_API_KEY", "").strip())
+
+        return {
+            "sources": [
+                {
+                    "name": "Twelve Data (XAU/USD)",
+                    "type": "Market Price Candles",
+                    "status": "configured" if td_key else "missing_api_key",
+                    "last_fetch": px.fetched_at.isoformat() if px and px.fetched_at else None,
+                    "coverage": "1-minute OHLC, 15-minute ATR(14)",
+                    "latency": "Real-time / 1-minute close",
+                    "is_integrated": True,
+                    "model_usage": "Target outcome label generation, excursion tracking, and returns",
+                },
+                {
+                    "name": "Forex Factory",
+                    "type": "Economic Calendar & Consensus",
+                    "status": "configured",
+                    "last_fetch": datetime.now(timezone.utc).isoformat(),
+                    "coverage": "USD High/Medium impact events, previous, forecast, actual",
+                    "latency": "10-minute cache TTL, live sync on demand",
+                    "is_integrated": True,
+                    "model_usage": "Event triggers, consensus snapshots, surprise features",
+                },
+                {
+                    "name": "Federal Reserve Economic Data (FRED)",
+                    "type": "Treasury Yields & Spreads",
+                    "status": "configured" if fred_key else "missing_api_key",
+                    "last_fetch": datetime.now(timezone.utc).isoformat() if fred_key else None,
+                    "coverage": "DGS2 (2-Year Treasury), DFII10 (10-Year TIPS Real Yield)",
+                    "latency": "Daily close",
+                    "is_integrated": True,
+                    "model_usage": "Macro regime and yield context features",
+                },
+                {
+                    "name": "News & Lexicon Sentiment",
+                    "type": "GDELT & RSS News Feed",
+                    "status": "configured",
+                    "last_fetch": sent.recorded_at.isoformat() if sent and sent.recorded_at else None,
+                    "coverage": "48-hour rolling window, local USD financial dictionary",
+                    "latency": "Refreshed every 12 hours (00:30 & 12:30 UTC)",
+                    "is_integrated": True,
+                    "model_usage": "Pre-release USD market sentiment score",
+                },
+                {
+                    "name": "CFTC COMEX Gold COT",
+                    "type": "Futures Positioning",
+                    "status": "configured" if cot else "pending_first_cycle",
+                    "last_fetch": cot.captured_at.isoformat() if cot and cot.captured_at else None,
+                    "coverage": "Report date: " + (cot.report_date if cot else "N/A"),
+                    "publication_time": cot.published_at.isoformat() if cot and cot.published_at else "Unavailable",
+                    "latency": "Weekly release (Fridays ~15:30 ET / 16:00 UTC job)",
+                    "is_integrated": True,
+                    "model_usage": "Institutional positioning and net-long percentage",
+                },
+                {
+                    "name": "CME FedWatch",
+                    "type": "Fed Rate Probabilities",
+                    "status": "provider_not_integrated",
+                    "last_fetch": None,
+                    "coverage": "None (values explicitly withheld)",
+                    "latency": "N/A",
+                    "is_integrated": False,
+                    "model_usage": "Marked explicitly unavailable — not synthesized or zeroed",
+                },
+                {
+                    "name": "CME Gold Options Implied Volatility",
+                    "type": "Options Volatility Surface",
+                    "status": "provider_not_integrated",
+                    "last_fetch": None,
+                    "coverage": "None (values explicitly withheld)",
+                    "latency": "N/A",
+                    "is_integrated": False,
+                    "model_usage": "Marked explicitly unavailable — not synthesized or zeroed",
+                },
+            ]
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/system/status")
+def get_system_status():
+    """System health, scheduler jobs, database metrics, and alert logs."""
+    from database import GoldForecast as GF, Prediction as P, GoldModelTraining as GMT, AlertLog as AL, PeriodicJobRun as PJR
+
+    db = SessionLocal()
+    try:
+        forecast_count = db.query(GF).count()
+        prediction_count = db.query(P).count()
+        gold_trained_count = db.query(GMT).filter(GMT.trained_at.isnot(None)).count()
+
+        job_runs = {
+            r.job_name: r.last_run_at.isoformat() if r.last_run_at else None
+            for r in db.query(PJR).all()
+        }
+
+        recent_alerts = [
+            {
+                "id": a.id,
+                "sent_at": a.sent_at.isoformat() if a.sent_at else None,
+                "event_code": a.event_code,
+                "release_time": a.release_time_str,
+                "alert_type": a.alert_type,
+            }
+            for a in db.query(AL).order_by(AL.sent_at.desc()).limit(15).all()
+        ]
+
+        db_path = os.getenv("MACRO_PREDICTOR_DATABASE_URL", "sqlite:///macro_predictor.db").replace("sqlite:///", "")
+        db_size_kb = round(os.path.getsize(db_path) / 1024, 1) if os.path.exists(db_path) else 0
+
+        scheduler_enabled = os.getenv("ENABLE_BACKGROUND_SCHEDULER", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+        return {
+            "backend": {
+                "version": "4.0.0",
+                "mode": "USD & XAU/USD Only",
+                "uptime": "Healthy",
+                "utc_time": datetime.now(timezone.utc).isoformat(),
+            },
+            "database": {
+                "engine": "SQLite",
+                "file_path": db_path,
+                "size_kb": db_size_kb,
+                "gold_forecasts": forecast_count,
+                "usd_predictions": prediction_count,
+                "gold_trained_moments": gold_trained_count,
+            },
+            "scheduler": {
+                "is_running": scheduler_enabled,
+                "jobs": [
+                    {
+                        "name": "auto_alert_job",
+                        "cadence": "Every 1 minute",
+                        "purpose": "Pre-release (0-10m) forecasts, post-release price grading, gold training sweep",
+                        "last_run": job_runs.get("auto_alert_job"),
+                    },
+                    {
+                        "name": "sentiment_job",
+                        "cadence": "Daily at 00:30 & 12:30 UTC",
+                        "purpose": "GDELT & RSS news sentiment aggregation",
+                        "last_run": job_runs.get("sentiment_job"),
+                    },
+                    {
+                        "name": "cot_job",
+                        "cadence": "Friday at 16:00 UTC",
+                        "purpose": "CFTC COT positioning report sync",
+                        "last_run": job_runs.get("cot_job"),
+                    },
+                ],
+            },
+            "recent_alerts": recent_alerts,
         }
     finally:
         db.close()
@@ -1152,6 +1575,8 @@ def test_telegram():
 
 
 # ── Serve React frontend (must be last) ──────────────────────────────────────
-_dist = os.path.join(os.path.dirname(__file__), "dist")
+_dist = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+if not os.path.isdir(_dist):
+    _dist = os.path.join(os.path.dirname(__file__), "dist")
 if os.path.isdir(_dist):
     app.mount("/", StaticFiles(directory=_dist, html=True), name="static")

@@ -53,21 +53,22 @@ def test_gold_sweep_grades_and_trains_pending_forecast(test_db, monkeypatch):
 
     trained_calls = []
 
-    def mock_fetch_and_record(code, rel_str):
-        row = db.query(GoldForecast).filter_by(release_time_utc=rel_str).first()
+    def mock_fetch_and_record_gold(rel_str, force_refresh=False, db=None):
+        sess = db or SessionLocal()
+        row = sess.query(GoldForecast).filter_by(release_time_utc=rel_str).first()
         if row:
             row.outcome_label = "BEARISH"
             row.gold_change_5m_pct = -0.32
             row.outcome_status = "graded"
             row.outcome_recorded_at = datetime.utcnow()
-            db.commit()
-        return {"status": "ok"}
+            sess.commit()
+        return True
 
     def mock_train_gold_outcome(rel_str):
         trained_calls.append(rel_str)
         return {"was_trained": True}
 
-    monkeypatch.setattr("price_data.fetch_and_record_price_reactions", mock_fetch_and_record)
+    monkeypatch.setattr("price_data.fetch_and_record_gold_outcome", mock_fetch_and_record_gold)
     monkeypatch.setattr("gold_model.train_gold_outcome", mock_train_gold_outcome)
 
     graded = scheduler.process_and_grade_gold_outcomes(db=db)

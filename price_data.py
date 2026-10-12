@@ -692,6 +692,7 @@ def fetch_and_record_price_reactions(
             pct_5 = pct_15 = pct_60 = None
             status_val = "unavailable"
             atr14 = None
+            df = None
 
             try:
                 r = requests.get(url, params=params, timeout=20)
@@ -788,7 +789,7 @@ def fetch_and_record_price_reactions(
             row.status = status_val
             row.fetched_at = datetime.now(timezone.utc).replace(tzinfo=None)
             db.commit()
-            if sym == "XAUUSD" and status_val == "ok":
+            if sym == "XAUUSD" and df is not None and not df.empty:
                 try:
                     from gold_model import record_gold_outcome
 
@@ -811,6 +812,81 @@ def fetch_and_record_price_reactions(
         }
     finally:
         db.close()
+
+
+def fetch_and_record_gold_outcome(
+    release_time_utc: str,
+    force_refresh: bool = False,
+    db=None,
+) -> bool:
+    """
+    Fetch 1-minute XAU/USD OHLC candles from Twelve Data for a release moment
+    and record the 5-minute reaction, excursions, and 1m/5m/15m/30m returns.
+
+    Directly grades the GoldForecast row independently of USD multi-pair logic.
+    Returns True if the outcome is successfully recorded.
+    """
+    from database import GoldForecast, SessionLocal
+    from gold_model import record_gold_outcome
+
+    rel_dt = parse_release_utc(release_time_utc)
+    if not rel_dt:
+        return False
+
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+
+    try:
+        row = db.query(GoldForecast).filter_by(release_time_utc=release_time_utc).first()
+        if row is None:
+            return False
+        if row.outcome_recorded_at is not None and not force_refresh:
+            return True
+
+        start_str = (rel_dt - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        end_str   = (rel_dt + timedelta(minutes=35)).strftime("%Y-%m-%d %H:%M:%S")
+
+        td_sym = _twelve_data_symbol("XAUUSD")
+        _rate_limit_wait()
+
+        url = f"{TWELVE_DATA_BASE}/time_series"
+        params = {
+            "symbol":     td_sym,
+            "interval":   "1min",
+            "start_date": start_str,
+            "end_date":   end_str,
+            "timezone":   "UTC",
+            "apikey":     TWELVE_DATA_KEY,
+            "format":     "JSON",
+        }
+
+        try:
+            r = requests.get(url, params=params, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+
+            if data.get("status") == "ok" and data.get("values"):
+                df = pd.DataFrame(data["values"]).astype({
+                    "open": float, "high": float, "low": float, "close": float,
+                })
+                df["datetime"] = pd.to_datetime(df["datetime"], utc=True).dt.tz_convert(None)
+                df = df.set_index("datetime").sort_index()
+
+                return record_gold_outcome(db, release_time_utc, df)
+            else:
+                log.warning(
+                    "Twelve Data returned non-ok for XAUUSD at %s: %s",
+                    release_time_utc, data.get("message")
+                )
+                return False
+        except Exception as e:
+            log.error("Twelve Data fetch failed for XAUUSD at %s: %s", release_time_utc, e)
+            return False
+    finally:
+        if close_db:
+            db.close()
 
 
 def process_and_grade_event_price_reactions(

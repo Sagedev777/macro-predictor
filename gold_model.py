@@ -312,6 +312,8 @@ def _latest_cot(db, currency: str, as_of: datetime):
         .all()
     )
     for row in rows:
+        if row.published_at and row.published_at > as_of_naive:
+            continue
         try:
             report_date = datetime.strptime(row.report_date, "%Y-%m-%d")
         except (TypeError, ValueError):
@@ -410,7 +412,12 @@ def _add_gold_market_features(captured_at: datetime, snapshot: dict) -> None:
                 continue
             valid = series.dropna()
             value = _finite_number(valid.iloc[-1])
-            observed = valid.index[-1].to_pydatetime()
+            _raw_idx = valid.index[-1]
+            observed = (
+                _raw_idx.to_pydatetime()
+                if hasattr(_raw_idx, "to_pydatetime")
+                else datetime.fromisoformat(str(_raw_idx))
+            )
             if observed.tzinfo is not None:
                 observed = observed.astimezone(timezone.utc).replace(tzinfo=None)
             stale = captured_at.replace(tzinfo=None) - observed > timedelta(days=7)
@@ -1386,18 +1393,32 @@ def get_walkforward_evaluation() -> dict:
             "brier_score": round(fbrier, 4),
         }
 
+    class_counts = {}
+    for r, _ in eligible:
+        class_counts[r.outcome_label] = class_counts.get(r.outcome_label, 0) + 1
+    majority_class = max(class_counts, key=class_counts.get) if class_counts else "NEUTRAL"
+    majority_hits = sum(1 for r, _ in eligible[1:] if r.outcome_label == majority_class)
+    baseline_acc = round(100.0 * majority_hits / n, 1) if n > 0 else 0.0
+
+    stat_note = (
+        " Statistical significance is not yet established (n < 20)."
+        if n < 20 else ""
+    )
+
     return {
         "n_evaluated": n,
         "overall": {
             "n": n,
             "accuracy_pct": round(100.0 * hits / n, 1),
             "brier_score": round(mean_brier, 4),
+            "baseline_majority_class": majority_class,
+            "baseline_accuracy_pct": baseline_acc,
         },
         "by_event_family": family_summary,
         "note": (
             "Chronological walk-forward: each prediction uses only outcomes from "
             "earlier releases. Features are point-in-time snapshots from forecast "
-            "creation time. Labels are XAU/USD 5-minute reaction classes."
+            f"creation time. Labels are XAU/USD 5-minute reaction classes.{stat_note}"
         ),
     }
 

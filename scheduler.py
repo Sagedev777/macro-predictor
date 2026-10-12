@@ -20,11 +20,18 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
-from alerts import BOT_TOKEN, CHAT_ID, send_telegram_alert
+from alerts import (
+    BOT_TOKEN,
+    CHAT_ID,
+    send_telegram_alert,
+    send_gold_prediction_alert,
+    send_gold_outcome_alert,
+)
 from calendar_feed import fetch_upcoming_red_folder_events
 from config.events import get_event_config
 from database import (
     AlertLog,
+    GoldForecast,
     PeriodicJobRun,
     Prediction as PredictionModel,
     SessionLocal,
@@ -227,16 +234,152 @@ def _format_price_result_message(pred) -> Optional[str]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# XAU/USD PRE-RELEASE FORECAST SCHEDULE & TELEGRAM HEADS-UP
+# ══════════════════════════════════════════════════════════════════════════════
+
+DEFAULT_GOLD_ALERT_MINUTES = [60, 30, 15, 10]
+
+
+def parse_release_dt_utc(release_time_str: str) -> Optional[datetime]:
+    """
+    Parse an ISO release time string and return a timezone-aware UTC datetime.
+    Rejects strings without a time component (tentative / all-day events)
+    to strictly prevent assuming releases occur at midnight.
+    """
+    if not release_time_str or not isinstance(release_time_str, str):
+        return None
+    s = release_time_str.strip()
+    # Check if purely a date (YYYY-MM-DD) without time
+    if len(s) == 10 and s.count("-") == 2:
+        return None
+    if "T" not in s and " " not in s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def get_gold_alert_minutes() -> list[int]:
+    """Return configured heads-up alert thresholds in descending order."""
+    raw = os.getenv("GOLD_ALERT_MINUTES_BEFORE", "60,30,15,10")
+    try:
+        tiers = [int(m.strip()) for m in raw.split(",") if m.strip()]
+        return sorted(tiers, reverse=True) if tiers else DEFAULT_GOLD_ALERT_MINUTES
+    except Exception:
+        return DEFAULT_GOLD_ALERT_MINUTES
+
+
+def process_pre_release_gold_predictions(
+    db,
+    events: list[dict],
+    now_utc: Optional[datetime] = None,
+    sender_func = None,
+) -> list[str]:
+    """
+    For every eligible scheduled USD economic release:
+      1. Pre-generate and persist GoldForecast at 1hr (<=60 mins) before scheduled release.
+      2. Repeatedly send 1hr, 30m, 15m, and 10m heads-up alerts to Telegram.
+      3. Save forecast BEFORE attempting Telegram delivery.
+      4. Idempotently track notification status, attempts, and errors in AlertLog.
+      5. Strictly reject past/released events and tentative/unknown times.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    tiers = get_gold_alert_minutes()
+    max_lead_min = max(tiers) if tiers else 60
+
+    # Group eligible USD events by release_time_utc
+    groups: dict[str, list[dict]] = {}
+    for ev in events:
+        currency = (ev.get("currency") or "USD").upper()
+        if currency != "USD":
+            continue
+        impact = (ev.get("impact") or "").upper()
+        if impact not in ("HIGH", "MEDIUM"):
+            continue
+        if not is_numeric_event(ev):
+            continue
+        rel_str = ev.get("release_time_utc")
+        if not rel_str:
+            continue
+        groups.setdefault(rel_str, []).append(ev)
+
+    processed_moments = []
+    for rel_str, release_group in groups.items():
+        rel_dt = parse_release_dt_utc(rel_str)
+        if rel_dt is None:
+            # Unknown or tentative time - do not invent a release time
+            continue
+
+        if rel_dt <= now_utc:
+            # Event already occurred or is currently releasing - do not send pre-release prediction
+            continue
+
+        minutes_until = (rel_dt - now_utc).total_seconds() / 60.0
+
+        # Only process if within the max pre-release window (e.g. 60 min)
+        if not (0 < minutes_until <= max_lead_min):
+            continue
+
+        # 1. Generate & persist GoldForecast (persisted before Telegram delivery)
+        existing_gf = (
+            db.query(GoldForecast)
+            .filter_by(release_time_utc=rel_str)
+            .first()
+        )
+        if not existing_gf:
+            try:
+                from gold_model import create_gold_forecast
+                create_gold_forecast(db, release_group, now=now_utc)
+                existing_gf = (
+                    db.query(GoldForecast)
+                    .filter_by(release_time_utc=rel_str)
+                    .first()
+                )
+            except Exception as e:
+                log.error("Failed to generate GoldForecast for %s: %s", rel_str, e)
+                continue
+
+        if not existing_gf:
+            continue
+
+        # 2. Check and dispatch appropriate heads-up tier
+        scheduled_time_str = f"{rel_dt.strftime('%Y-%m-%d %H:%M')} UTC"
+
+        for i, tier in enumerate(tiers):
+            lower_bound = tiers[i + 1] if i + 1 < len(tiers) else 0
+            if lower_bound < minutes_until <= tier:
+                ok, err = send_gold_prediction_alert(
+                    db,
+                    existing_gf,
+                    stage_minutes=tier,
+                    scheduled_time_str=scheduled_time_str,
+                    sender_func=sender_func,
+                )
+                if ok:
+                    processed_moments.append(f"{rel_str}:{tier}m")
+                break
+
+    return processed_moments
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CORE SCHEDULER JOB — every 1 minute
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_and_alert_upcoming():
     """
     Every 1 minute:
-      1. Pre-release check — send Telegram alert if event within 10-minute window.
-         Only fires for HIGH or MEDIUM impact events.
-      2. Post-release grading — grade predictions when actuals appear.
-      3. One River observation per fully graded release moment.
+      0. Pre-release XAU/USD gold prediction & multi-stage heads-up alerts (60m, 30m, 15m, 10m).
+      1. Pre-release USD economic composite score check (0-10m).
+      2. Post-release grading when actuals appear.
+      3. Sweep and grade gold outcomes >= 35m post-release with Telegram outcome alerts.
     """
     from learning import (
         capture_prediction_features,
@@ -245,8 +388,6 @@ def check_and_alert_upcoming():
         _registry,
     )
 
-    # Keep reading ALERT_HOURS_BEFORE so /api/health still reports it correctly,
-    # but pre-release alerts now use a fixed 10-minute window instead.
     try:
         hours_before = float(os.getenv("ALERT_HOURS_BEFORE", "2"))
     except ValueError:
@@ -254,8 +395,15 @@ def check_and_alert_upcoming():
 
     db = SessionLocal()
     try:
-        events  = fetch_upcoming_red_folder_events(force_refresh=False)
-        now_utc = datetime.utcnow()
+        events = fetch_upcoming_red_folder_events(force_refresh=False)
+        now_aware = datetime.now(timezone.utc)
+        now_utc = now_aware.replace(tzinfo=None)
+
+        # ── 0. PRE-RELEASE GOLD PREDICTIONS & MULTI-TIER HEADS-UP ────────────
+        try:
+            process_pre_release_gold_predictions(db, events, now_utc=now_aware)
+        except Exception as pge:
+            log.error("process_pre_release_gold_predictions error: %s", pge)
 
         for ev in events:
             code     = ev.get("event_code")
@@ -591,15 +739,17 @@ def run_cron_jobs(now: Optional[datetime] = None) -> list[str]:
 # SEED CHECK — run once on startup if models are untrained
 # ══════════════════════════════════════════════════════════════════════════════
 
-def process_and_grade_gold_outcomes(db=None) -> list[str]:
+def process_and_grade_gold_outcomes(db=None, sender_func=None) -> list[str]:
     """
     Sweep pending GoldForecast rows where release is >= 35 minutes ago,
-    grade their outcome via fetch_and_record_price_reactions, and trigger
-    incremental learning via train_gold_outcome().
+    grade their outcome via fetch_and_record_gold_outcome, trigger
+    incremental learning via train_gold_outcome(), and send an outcome
+    verification alert to Telegram (confirming truth or failed).
     """
     from database import GoldForecast as GoldForecastModel, SessionLocal
     from gold_model import train_gold_outcome
-    from price_data import fetch_and_record_price_reactions, parse_release_utc
+    from price_data import fetch_and_record_gold_outcome, parse_release_utc
+    from alerts import send_gold_outcome_alert
 
     close_db = False
     if db is None:
@@ -613,7 +763,6 @@ def process_and_grade_gold_outcomes(db=None) -> list[str]:
             db.query(GoldForecastModel)
             .filter(
                 GoldForecastModel.outcome_recorded_at.is_(None),
-                GoldForecastModel.outcome_status == "pending",
                 GoldForecastModel.release_time_utc.isnot(None),
             )
             .all()
@@ -623,15 +772,14 @@ def process_and_grade_gold_outcomes(db=None) -> list[str]:
             if not rel_dt:
                 continue
             if (now_utc - rel_dt).total_seconds() >= 35 * 60:
-                try:
-                    event_codes = json.loads(gf.event_codes_json or "[]")
-                except Exception:
-                    event_codes = []
-                code = event_codes[0] if event_codes else "USD_RELEASE"
-                fetch_and_record_price_reactions(code, gf.release_time_utc)
+                fetch_and_record_gold_outcome(gf.release_time_utc, db=db)
                 db.refresh(gf)
                 if gf.outcome_recorded_at is not None:
                     train_gold_outcome(gf.release_time_utc)
+                    try:
+                        send_gold_outcome_alert(db, gf, sender_func=sender_func)
+                    except Exception as ae:
+                        log.warning("Failed to send gold outcome alert for %s: %s", gf.release_time_utc, ae)
                     graded.append(gf.release_time_utc)
     finally:
         if close_db:

@@ -239,11 +239,16 @@ class GoldForecast(Base):
 class AlertLog(Base):
     __tablename__ = "alert_logs"
 
-    id               = Column(Integer, primary_key=True, autoincrement=True)
-    sent_at          = Column(DateTime, default=datetime.utcnow)
-    event_code       = Column(String(20), nullable=False)
-    release_time_str = Column(String(50), nullable=True)
-    alert_type       = Column(String(20))   # PRE_RELEASE / ACTUAL_POSTED / PRICE_RESULT
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    sent_at           = Column(DateTime, default=datetime.utcnow)
+    event_code        = Column(String(50), nullable=False)
+    release_time_str  = Column(String(50), nullable=True)
+    alert_type        = Column(String(50))   # PRE_RELEASE / ACTUAL_POSTED / PRICE_RESULT / GOLD_PRE_60M / GOLD_PRE_30M / GOLD_PRE_15M / GOLD_PRE_10M / GOLD_OUTCOME
+    idempotency_key   = Column(String(150), nullable=True, unique=True, index=True)
+    status            = Column(String(20), nullable=False, default="sent")   # sent, failed, pending
+    delivery_attempts = Column(Integer, nullable=False, default=1)
+    last_attempt_at   = Column(DateTime, nullable=True)
+    error_message     = Column(Text, nullable=True)
 
 
 class PeriodicJobRun(Base):
@@ -511,6 +516,16 @@ def init_db():
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_logs_release_type "
             "ON alert_logs (event_code, release_time_str, alert_type) "
             "WHERE release_time_str IS NOT NULL"
+        ))
+        _add_column_if_missing(conn, "alert_logs", "idempotency_key", "VARCHAR(150)")
+        _add_column_if_missing(conn, "alert_logs", "status", "VARCHAR(20) NOT NULL DEFAULT 'sent'")
+        _add_column_if_missing(conn, "alert_logs", "delivery_attempts", "INTEGER NOT NULL DEFAULT 1")
+        _add_column_if_missing(conn, "alert_logs", "last_attempt_at", "DATETIME")
+        _add_column_if_missing(conn, "alert_logs", "error_message", "TEXT")
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_logs_idempotency_key "
+            "ON alert_logs (idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL"
         ))
 
         # ── GoldModelTraining: safe creation if table doesn't exist yet ──────
