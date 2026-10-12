@@ -166,6 +166,8 @@ class ConsensusSnapshot(Base):
     previous         = Column(Float, nullable=True)
     previous_revised = Column(Float, nullable=True)
     actual           = Column(Float, nullable=True)
+    actual_first_seen_at = Column(DateTime, nullable=True)
+    actual_source    = Column(String(100), nullable=True)
     source           = Column(String(100), nullable=False)
 
 
@@ -327,6 +329,12 @@ def init_db():
     with engine.begin() as conn:
         _add_column_if_missing(
             conn, "consensus_snapshots", "data_as_of", "DATETIME"
+        )
+        _add_column_if_missing(
+            conn, "consensus_snapshots", "actual_first_seen_at", "DATETIME"
+        )
+        _add_column_if_missing(
+            conn, "consensus_snapshots", "actual_source", "VARCHAR(100)"
         )
 
         # ── Prediction feature snapshots ────────────────────────────────

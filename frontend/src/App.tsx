@@ -26,6 +26,7 @@ interface CalEvent {
 interface PredSummary {
   lean_direction: string
   event_label: string
+  explanation?: string
   confidence_pct: number
   composite_score: number
   trade_signals: string[]
@@ -38,11 +39,19 @@ interface PairSignal { pair: string; direction: string; bias: number; confidence
 
 interface OrderSug {
   pair: string; bias: string; current_price: number | null
+  atr_14?: number | null
   suggested_entry: number | null; suggested_sl: number | null; suggested_tp: number | null
   confidence_pct: number
 }
 
-interface Indicator { description: string; z_score: number | null; signal: number; weight: number }
+interface Indicator {
+  description: string
+  latest_value?: number | null
+  prev_value?: number | null
+  z_score: number | null
+  signal: number
+  weight: number
+}
 
 interface ModelStatus {
   currency: string; n_trained: number; n_real: number
@@ -76,10 +85,10 @@ interface AccStats {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const FW_LABELS: Record<string, string> = {
-  indicator_score: 'Indicator',
-  rate_diff_score: 'Rate Diff',
-  cot_score: 'COT',
-  sentiment_score: 'Sentiment',
+  indicator_score: 'Economic indicators',
+  rate_diff_score: 'Interest-rate gap',
+  cot_score: 'Market positioning',
+  sentiment_score: 'Market sentiment',
 }
 const FW_KEYS = ['indicator_score', 'rate_diff_score', 'cot_score', 'sentiment_score']
 const FW_COLORS = ['#6366f1', '#06b6d4', '#f59e0b', '#10b981']
@@ -162,6 +171,148 @@ function buildPairsFromPred(pred: PredSummary): { dir: string; pair: string }[] 
     }))
 }
 
+function indicatorAlignment(pred: PredSummary) {
+  const active = (pred.indicators ?? []).filter(ind => ind.signal !== 0)
+  const aligned = active.filter(ind =>
+    (pred.lean_direction === 'BEAT' && ind.signal > 0) ||
+    (pred.lean_direction === 'MISS' && ind.signal < 0)
+  )
+  const activeWeight = active.reduce((sum, ind) => sum + ind.weight, 0)
+  const alignedWeight = aligned.reduce((sum, ind) => sum + ind.weight, 0)
+  return {
+    active: active.length,
+    aligned: aligned.length,
+    weightedPercent: activeWeight > 0 ? Math.round((alignedWeight / activeWeight) * 100) : null,
+  }
+}
+
+function formatPair(pair: string): string {
+  const normalized = pair.replace('/', '').toUpperCase()
+  return normalized.length === 6
+    ? `${normalized.slice(0, 3)}/${normalized.slice(3)}`
+    : pair
+}
+
+function PairOutlook({ prediction }: { prediction: PredSummary }) {
+  const scenarioPairs = buildPairsFromPred(prediction)
+  const liveDirectionalPairs = (prediction.pair_signals ?? [])
+    .filter(signal => signal.direction.toUpperCase() !== 'NEUTRAL')
+
+  return (
+    <section className="pair-outlook">
+      <div className="insight-section-heading">Possible FX scenario</div>
+      <p className="insight-section-copy">
+        Configured implications of the release lean, not separate forecasts for each pair.
+      </p>
+      {scenarioPairs.length > 0 ? (
+        <div className="pair-chip-list">
+          {scenarioPairs.map(({ dir, pair }) => (
+            <div key={pair} className={`pair-chip ${dir.toUpperCase() === 'BUY' ? 'bull' : 'bear'}`}>
+              <span>{dir.toUpperCase() === 'BUY' ? 'Buy' : 'Sell'}</span>
+              <strong>{formatPair(pair)}</strong>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="insight-section-copy">No configured pair scenario is available for this event.</p>
+      )}
+      <div className="pair-model-note">
+        <strong>Separate pair model:</strong>{' '}
+        {liveDirectionalPairs.length > 0
+          ? liveDirectionalPairs.map(signal =>
+              `${formatPair(signal.pair)} ${signal.direction.toLowerCase()} (${signal.confidence_pct.toFixed(0)}%)`
+            ).join(' · ')
+          : 'neutral across the tracked pairs right now.'}
+      </div>
+    </section>
+  )
+}
+
+function IndicatorEvidence({ prediction }: { prediction: PredSummary }) {
+  const [expanded, setExpanded] = useState(false)
+  const indicators = prediction.indicators ?? []
+  const alignment = indicatorAlignment(prediction)
+  const leanText = prediction.lean_direction === 'BEAT'
+    ? 'above consensus'
+    : prediction.lean_direction === 'MISS'
+      ? 'below consensus'
+      : 'inline with consensus'
+
+  if (indicators.length === 0) return null
+
+  return (
+    <section className="evidence-card">
+      <div className="insight-section-heading">Why this release lean?</div>
+      <p className="evidence-summary">
+        {alignment.aligned} of {alignment.active} active leading-indicator signals support a result {leanText}
+        {alignment.weightedPercent != null ? ` (${alignment.weightedPercent}% of active weight)` : ''}.
+      </p>
+      {prediction.explanation && <p className="evidence-interpretation">{prediction.explanation}</p>}
+      <button
+        className="evidence-toggle"
+        onClick={() => setExpanded(value => !value)}
+        aria-expanded={expanded}
+      >
+        {expanded ? 'Hide indicator evidence' : `View ${indicators.length} indicator inputs`}
+      </button>
+      {expanded && (
+        <div className="evidence-list">
+          {indicators.map((indicator, index) => (
+            <div className="evidence-row" key={`${indicator.description}-${index}`}>
+              <span className={`evidence-signal ${indicator.signal > 0 ? 'bull' : indicator.signal < 0 ? 'bear' : 'flat'}`}>
+                {indicator.signal > 0 ? 'Supports beat' : indicator.signal < 0 ? 'Supports miss' : 'Neutral'}
+              </span>
+              <div className="evidence-main">
+                <strong>{indicator.description}</strong>
+                <span>
+                  Latest {indicator.latest_value ?? '—'}
+                  {indicator.prev_value != null ? ` · previous ${indicator.prev_value}` : ''}
+                  {indicator.z_score != null ? ` · 6-month z-score ${indicator.z_score.toFixed(2)}` : ''}
+                </span>
+              </div>
+              <span className="evidence-weight">{(indicator.weight * 100).toFixed(0)}% weight</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="evidence-disclaimer">
+        These are economic indicator inputs, not a live-news research summary. A positive lean is not a guarantee of the release or market reaction.
+      </p>
+    </section>
+  )
+}
+
+function EntryReference({ suggestions }: { suggestions?: OrderSug[] }) {
+  const entry = suggestions?.find(suggestion =>
+    suggestion.suggested_entry != null && suggestion.bias.toUpperCase() !== 'NEUTRAL'
+  )
+
+  return (
+    <section className="entry-reference">
+      <div className="insight-section-heading">Optional ATR reference levels</div>
+      {entry ? (
+        <>
+          <div className="entry-reference-heading">
+            <strong>{entry.bias.toUpperCase()} {formatPair(entry.pair)}</strong>
+            {entry.current_price != null && <span>Current price {fmtNum(entry.current_price, 5)}</span>}
+          </div>
+          <div className="entry-reference-levels">
+            <div><span>Entry reference</span><strong>{fmtNum(entry.suggested_entry, 5)}</strong></div>
+            <div><span>Stop reference</span><strong>{fmtNum(entry.suggested_sl, 5)}</strong></div>
+            <div><span>Target reference</span><strong>{fmtNum(entry.suggested_tp, 5)}</strong></div>
+            {entry.atr_14 != null && <div><span>14-period ATR</span><strong>{fmtNum(entry.atr_14, 5)}</strong></div>}
+          </div>
+          <p className="evidence-disclaimer">ATR-based planning references only. They do not place an order or predict where price will trade.</p>
+        </>
+      ) : (
+        <p className="insight-section-copy">
+          No level is available: the pair model is neutral, or price/ATR data is missing. These levels are calculated only when a directional pair bias and market data are available.
+        </p>
+      )}
+    </section>
+  )
+}
+
 function fmtNum(n: number | null, dp = 3): string {
   return n == null ? '—' : n.toFixed(dp)
 }
@@ -230,7 +381,7 @@ const NAV_ITEMS: { page: Page; icon: React.ReactNode; label: string }[] = [
         <line x1="6" y1="20" x2="6" y2="14"/>
       </svg>
     ),
-    label: 'Model',
+    label: 'Insights',
   },
   {
     page: 'track',
@@ -243,7 +394,7 @@ const NAV_ITEMS: { page: Page; icon: React.ReactNode; label: string }[] = [
         <polyline points="10 9 9 9 8 9"/>
       </svg>
     ),
-    label: 'Records',
+    label: 'History',
   },
 ]
 
@@ -251,8 +402,11 @@ function SideNav({ page, setPage }: { page: Page; setPage: (p: Page) => void }) 
   return (
     <nav className="side-rail" aria-label="Main navigation">
       <div className="rail-logo">
-        <img src="/logo.png" alt="Titanfxsage" style={{ width: 28, height: 28, objectFit: 'contain' }} />
-        Titanfxsage
+        <img src="/logo.png" alt="" style={{ width: 34, height: 34, objectFit: 'contain' }} />
+        <span className="rail-brand-copy">
+          <strong>TitanFX Sage</strong>
+          <small>MACRO INSIGHTS</small>
+        </span>
       </div>
       <div className="rail-nav">
         {NAV_ITEMS.map(item => (
@@ -300,18 +454,28 @@ function ImpactDot({ impact }: { impact: string }) {
 // HOME PAGE
 // ══════════════════════════════════════════════════════════════════════════════
 
-function HomePage({ now }: { now: number }) {
+function HomePage({ now, onOpenCalendar }: { now: number; onOpenCalendar: () => void }) {
   const [events, setEvents] = useState<CalEvent[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
   const warmupFired = useRef(false)
 
-  useEffect(() => {
-    setLoading(true)
-    axios.get(`${API}/events`)
-      .then(r => setEvents(r.data.events ?? []))
-      .catch(() => setEvents([]))
-      .finally(() => setLoading(false))
+  const loadEvents = useCallback(async (showLoading = false) => {
+    if (showLoading) setLoading(true)
+    try {
+      const response = await axios.get(`${API}/events`)
+      setEvents(response.data.events ?? [])
+      setLoadError(false)
+    } catch {
+      setLoadError(true)
+    } finally {
+      setLoading(false)
+    }
   }, [])
+
+  useEffect(() => {
+    void loadEvents(true)
+  }, [loadEvents])
 
   // Fire warmup + full cycle once after events load
   useEffect(() => {
@@ -319,24 +483,16 @@ function HomePage({ now }: { now: number }) {
       warmupFired.current = true
       axios.post(`${API}/predictions/warmup`).catch(() => { /* fire and forget */ })
       axios.post(`${API}/run-full-cycle`).catch(() => { /* fire and forget */ })
-      const timer = setTimeout(() => {
-        axios.get(`${API}/events`)
-          .then(r => setEvents(r.data.events ?? []))
-          .catch(() => { /* noop */ })
-      }, 15000)
+      const timer = setTimeout(() => { void loadEvents() }, 15000)
       return () => clearTimeout(timer)
     }
-  }, [events.length])
+  }, [events.length, loadEvents])
 
   // Auto-refresh events every 60 seconds
   useEffect(() => {
-    const id = setInterval(() => {
-      axios.get(`${API}/events`)
-        .then(r => setEvents(r.data.events ?? []))
-        .catch(() => {})
-    }, 60000)
+    const id = setInterval(() => { void loadEvents() }, 60000)
     return () => clearInterval(id)
-  }, [])
+  }, [loadEvents])
 
   // Find next upcoming event (all events are USD)
   const nextEvent = useMemo(() => {
@@ -371,9 +527,16 @@ function HomePage({ now }: { now: number }) {
     return (
       <div className="page">
         <div className="home-no-event">
-          <span style={{ fontSize: 32, color: 'var(--text-dim)' }}>—</span>
-          <span>No events found</span>
-          <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>Try selecting a different currency or wait for the calendar to refresh</span>
+          <span className="empty-state-icon" aria-hidden="true">◷</span>
+          <h2>{loadError ? 'Calendar unavailable right now' : 'No upcoming releases'}</h2>
+          <p>
+            {loadError
+              ? 'We couldn’t reach the calendar. Please try again in a moment.'
+              : 'The economic calendar refreshes automatically. Check the full calendar for recent updates.'}
+          </p>
+          {loadError
+            ? <button className="primary-action" onClick={() => void loadEvents(true)}>Try again</button>
+            : <button className="primary-action" onClick={onOpenCalendar}>View calendar</button>}
         </div>
       </div>
     )
@@ -383,14 +546,11 @@ function HomePage({ now }: { now: number }) {
   const released = nextEvent.actual !== null || new Date(nextEvent.release_time_utc).getTime() <= now
   const countdown = formatCountdown(nextEvent.release_time_utc, now)
   const eventName = nextEvent.display_name ?? nextEvent.event_name
-  const pairs = pred ? buildPairsFromPred(pred) : []
-
-  const topEntry = pred?.order_suggestions?.find(s => s.suggested_entry != null)
 
   return (
     <div className="page">
       <div className="home-card">
-        {/* Header — FIX 7: impact badge added, FIX 2: no FLAG emoji */}
+        <div className="home-card-kicker">NEXT KEY RELEASE</div>
         <div className="home-header">
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="home-event-name">{eventName}</div>
@@ -439,17 +599,20 @@ function HomePage({ now }: { now: number }) {
           <div className="home-direction">
             <div className={`home-dir-label ${directionClass(pred.lean_direction)}`}>
               <span className={`badge badge-${directionClass(pred.lean_direction) === 'bull' ? 'buy' : directionClass(pred.lean_direction) === 'bear' ? 'sell' : 'hold'}`}>
-                {directionLabel(pred.lean_direction)}
+                {pred.lean_direction}
               </span>
-              <span style={{ marginLeft: 8, fontSize: 16, color: 'var(--text)' }}>{nextEvent.currency}</span>
+              <span style={{ marginLeft: 8, fontSize: 16, color: 'var(--text)' }}>release lean</span>
             </div>
             {pred.event_label && pred.event_label !== pred.lean_direction && (
               <div className="home-dir-sub">{pred.event_label}</div>
             )}
             <div className="home-conf-wrap">
               <ConfBar pct={pred.confidence_pct} />
-              <div className="home-conf-label">{pred.confidence_pct.toFixed(0)}% confidence</div>
+              <div className="home-conf-label">{pred.confidence_pct.toFixed(0)}% heuristic score · not a probability</div>
             </div>
+            <p className="confidence-explainer">
+              This rule-based score is capped at 85%. A score of 85 does not mean an 85% chance of being right.
+            </p>
           </div>
         ) : (
           <div className="home-direction">
@@ -460,30 +623,9 @@ function HomePage({ now }: { now: number }) {
           </div>
         )}
 
-        {/* Affected pairs */}
-        {pairs.length > 0 && (
-          <div className="home-pairs">
-            <div className="home-pairs-title">Affected majors</div>
-            <div className="home-pairs-list">
-              {pairs.map((p, i) => (
-                <div key={i} className={`home-pair-row ${p.dir.toUpperCase() === 'BUY' ? 'bull' : 'bear'}`}>
-                  <span className="home-pair-dir">{p.dir}</span>
-                  <span className="home-pair-name">{p.pair}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Suggested entry */}
-        <div className="home-entry">
-          <div className="home-entry-label">Suggested entry</div>
-          <div className="home-entry-value">
-            {topEntry?.suggested_entry != null
-              ? fmtNum(topEntry.suggested_entry, 5)
-              : '— await release'}
-          </div>
-        </div>
+        {pred && <IndicatorEvidence prediction={pred} />}
+        {pred && <PairOutlook prediction={pred} />}
+        {pred && <EntryReference suggestions={pred.order_suggestions} />}
         <div className="home-disclaimer">Reference only — not financial advice</div>
       </div>
     </div>
@@ -499,10 +641,6 @@ function CalendarEventRow({ ev, isExpanded, onToggle }: {
 }) {
   const pred = ev.prediction
   const released = ev.actual !== null
-  const [showIndicators, setShowIndicators] = useState(false)
-
-  const pairs = pred ? buildPairsFromPred(pred) : []
-  const indicators = pred?.indicators ?? []
 
   const timeStr = (() => {
     try {
@@ -545,48 +683,18 @@ function CalendarEventRow({ ev, isExpanded, onToggle }: {
           <div className="cal-pred-label">Prediction</div>
           <div className={`cal-dir ${directionClass(pred.lean_direction)}`}>
             <span className={`badge badge-${directionClass(pred.lean_direction) === 'bull' ? 'buy' : directionClass(pred.lean_direction) === 'bear' ? 'sell' : 'hold'}`}>
-              {directionLabel(pred.lean_direction)}
+            {pred.lean_direction}
             </span>
-            <span style={{ marginLeft: 8, fontSize: 14, color: 'var(--text)' }}>{ev.currency}</span>
+            <span style={{ marginLeft: 8, fontSize: 14, color: 'var(--text)' }}>release lean</span>
           </div>
           <CalConfBar pct={pred.confidence_pct} />
-          <div className="cal-conf-label">{pred.confidence_pct.toFixed(0)}% confidence</div>
-
-          {pairs.length > 0 && (
-            <div className="cal-pairs-list">
-              {pairs.map((p, i) => (
-                <div key={i} className={`cal-pair-row ${p.dir.toUpperCase() === 'BUY' ? 'bull' : 'bear'}`}>
-                  <span style={{ fontSize: 11, opacity: 0.8, minWidth: 32 }}>{p.dir}</span>
-                  <span style={{ fontWeight: 700, fontSize: 14 }}>{p.pair}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {indicators.length > 0 && (
-            <>
-              <button
-                className="cal-indicators-toggle"
-                onClick={e => { e.stopPropagation(); setShowIndicators(v => !v) }}
-                aria-expanded={showIndicators}
-              >
-                {showIndicators ? 'Hide indicators ▲' : 'Show indicators ▼'}
-              </button>
-              {showIndicators && (
-                <div className="cal-indicators-list">
-                  {indicators.map((ind, i) => (
-                    <div key={i} className="cal-ind-row">
-                      <span className={`cal-ind-dot ${ind.signal > 0 ? 'bull' : ind.signal < 0 ? 'bear' : 'flat'}`}>
-                        {ind.signal > 0 ? '▲' : ind.signal < 0 ? '▼' : '●'}
-                      </span>
-                      <span className="cal-ind-desc">{ind.description}</span>
-                      <span className="cal-ind-z">{ind.z_score != null ? ind.z_score.toFixed(2) : '—'}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
+          <div className="cal-conf-label">{pred.confidence_pct.toFixed(0)}% heuristic score · not a probability</div>
+          <p className="confidence-explainer">
+            The rule-based indicator-alignment score is capped at 85%; this is not an 85% chance of being correct.
+          </p>
+          <IndicatorEvidence prediction={pred} />
+          <PairOutlook prediction={pred} />
+          <EntryReference suggestions={pred.order_suggestions} />
         </div>
       )}
 
@@ -602,12 +710,18 @@ function CalendarEventRow({ ev, isExpanded, onToggle }: {
 function CalendarPage() {
   const [events, setEvents] = useState<CalEvent[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [pastExpanded, setPastExpanded] = useState(false)
 
   const load = useCallback(async () => {
-    try { const r = await axios.get(`${API}/events`); setEvents(r.data.events ?? []) }
-    catch { setEvents([]) }
+    try {
+      const response = await axios.get(`${API}/events`)
+      setEvents(response.data.events ?? [])
+      setLoadError(false)
+    } catch {
+      setLoadError(true)
+    }
     finally { setLoading(false) }
   }, [])
 
@@ -681,11 +795,11 @@ function CalendarPage() {
       <div className="cal2-table">
         <div className="cal2-table-head">
           <span className="cal2-time" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Time</span>
-          <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>CCY</span>
+          <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>Currency</span>
           <span className="cal2-name" style={{ color: 'var(--text-dim)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Event</span>
           <span />
-          <span className="cal2-num" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Fcst</span>
-          <span className="cal2-num" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Prev</span>
+          <span className="cal2-num" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Forecast</span>
+          <span className="cal2-num" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Previous</span>
           <span className="cal2-actual" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Actual</span>
         </div>
         {grp.events.map((ev, i) => {
@@ -713,8 +827,11 @@ function CalendarPage() {
 
       {!loading && events.length === 0 && (
         <div className="empty-state">
-          <p>No events found.</p>
-          <p className="sub">Calendar will refresh automatically.</p>
+          <h2>{loadError ? 'Calendar unavailable right now' : 'No upcoming releases'}</h2>
+          <p>{loadError
+            ? 'We couldn’t load the calendar. Please try again in a moment.'
+            : 'New releases will appear here as soon as they are available.'}</p>
+          {loadError && <button className="primary-action" onClick={() => { setLoading(true); void load() }}>Try again</button>}
         </div>
       )}
 
@@ -749,7 +866,7 @@ interface CalibRow {
 }
 
 function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTrendWindow[]; improving: boolean }) {
-  const ccyColor = '#3b82f6'  // USD blue
+  const ccyColor = '#347653'
 
   if (windows.length < 2) {
     return (
@@ -788,20 +905,20 @@ function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTren
           {([0, 100] as number[]).map(v => (
             <g key={v}>
               <line x1={PAD.left} y1={yScale(v)} x2={W - PAD.right} y2={yScale(v)}
-                stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
-              <text x={PAD.left - 4} y={yScale(v) + 4} fontSize={8} fill="rgba(255,255,255,0.3)" textAnchor="end">{v}</text>
+                stroke="#e5ebe3" strokeWidth={1} />
+              <text x={PAD.left - 4} y={yScale(v) + 4} fontSize={8} fill="#758177" textAnchor="end">{v}</text>
             </g>
           ))}
           {/* Baseline at 50% (dashed accent) */}
           <line x1={PAD.left} y1={yScale(50)} x2={W - PAD.right} y2={yScale(50)}
-            stroke="rgba(59,130,246,0.35)" strokeWidth={1} strokeDasharray="4 3" />
-          <text x={PAD.left - 4} y={yScale(50) + 4} fontSize={8} fill="rgba(59,130,246,0.5)" textAnchor="end">50</text>
+            stroke="rgba(52,118,83,0.35)" strokeWidth={1} strokeDasharray="4 3" />
+          <text x={PAD.left - 4} y={yScale(50) + 4} fontSize={8} fill="rgba(52,118,83,0.7)" textAnchor="end">50</text>
           {/* X tick labels */}
           {firstDate && (
-            <text x={PAD.left} y={H - 4} fontSize={8} fill="rgba(255,255,255,0.3)" textAnchor="start">{firstDate}</text>
+            <text x={PAD.left} y={H - 4} fontSize={8} fill="#758177" textAnchor="start">{firstDate}</text>
           )}
           {lastDate && windows.length > 1 && (
-            <text x={W - PAD.right} y={H - 4} fontSize={8} fill="rgba(255,255,255,0.3)" textAnchor="end">{lastDate}</text>
+            <text x={W - PAD.right} y={H - 4} fontSize={8} fill="#758177" textAnchor="end">{lastDate}</text>
           )}
           {/* Polyline */}
           <polyline
@@ -866,7 +983,7 @@ function ModelPage() {
     <div className="page">
 
       {/* ── SECTION 1: Accuracy Trend ──────────────────────────────────── */}
-      <div className="section-title">1 · Accuracy Trend</div>
+      <div className="section-title">Forecast accuracy</div>
       {trend.filter(t => t.currency !== 'ALL').length === 0 ? (
         <div className="empty-state"><p>No trend data available yet.</p></div>
       ) : (
@@ -878,7 +995,7 @@ function ModelPage() {
       )}
 
       {/* ── SECTION 2: n_trained per currency ─────────────────────────── */}
-      <div className="section-title">2 · Training Progress</div>
+      <div className="section-title">Learning progress</div>
       {models.length === 0 ? (
         <div className="empty-state"><p>No model data available.</p></div>
       ) : (
@@ -888,12 +1005,12 @@ function ModelPage() {
               <div className="model-card-head">
                 <span className="ccy-badge model-ccy">{m.currency}</span>
                 <span className={`status-badge ${m.status}`}>
-                  {m.status === 'learning' ? 'Learning' : m.status === 'seeded_only' ? 'Seeded' : 'Untrained'}
+                  {m.status === 'learning' ? 'Learning' : m.status === 'seeded_only' ? 'Getting started' : 'Not started'}
                 </span>
               </div>
-              <div className="model-n">n = {m.n_trained}</div>
+              <div className="model-n">{m.n_trained} release moments</div>
               <div className="model-n-sub">
-                {m.n_real > 0 ? `${m.n_real} real outcomes` : 'Seed data only'}
+                {m.n_real > 0 ? `${m.n_real} confirmed outcomes` : 'Building its first track record'}
               </div>
               {m.live_accuracy != null && (
                 <div className="model-acc">{(m.live_accuracy * 100).toFixed(1)}% accuracy</div>
@@ -904,7 +1021,7 @@ function ModelPage() {
       )}
 
       {/* ── SECTION 3: Mistake Log ────────────────────────────────────── */}
-      <div className="section-title">3 · Mistake Log</div>
+      <div className="section-title">Forecasts to review</div>
       {mistakes.length === 0 ? (
         <div className="empty-state"><p>No wrong predictions recorded yet.</p></div>
       ) : (
@@ -935,7 +1052,7 @@ function ModelPage() {
                     <span className="mistake-nums">fcst {h.forecast ?? '—'} / actual {h.actual ?? '—'} (surprise {surprise})</span>
                   </div>
                   <div className="mistake-field">
-                    <span className="mistake-label">Estimated weight shift</span>
+                    <span className="mistake-label">Learning note</span>
                     <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
                       {h.weight_shift ?? 'Not enough data \u2014 estimated weights shown after 5 real outcomes'}
                     </span>
@@ -948,7 +1065,7 @@ function ModelPage() {
       )}
 
       {/* ── SECTION 4: Feature Importance ────────────────────────────── */}
-      <div className="section-title">4 · Feature Importance</div>
+      <div className="section-title">What influences forecasts</div>
       {models.length === 0 ? (
         <div className="empty-state"><p>No data.</p></div>
       ) : (
@@ -982,17 +1099,17 @@ function ModelPage() {
       )}
 
       {/* ── SECTION 5: Calibration Check ─────────────────────────────── */}
-      <div className="section-title">5 · Calibration Check</div>
+      <div className="section-title">Confidence guide</div>
       {calibration.length === 0 ? (
         <div className="empty-state"><p>No graded predictions yet.</p></div>
       ) : (
         <div className="calib-card">
           <div className="calib-table-head">
-            <span>Bucket</span>
-            <span>Stated</span>
-            <span>Actual win rate</span>
-            <span>Count</span>
-            <span>Flag</span>
+            <span>Confidence band</span>
+            <span>Expected</span>
+            <span>Observed</span>
+            <span>Releases</span>
+            <span>Note</span>
           </div>
           {calibration.map(row => {
             const winPct = (row.actual_win_rate * 100).toFixed(1)
@@ -1087,13 +1204,13 @@ function TrackPage() {
           <div className="kpi-value yellow">
             {history.length > 0 ? `${avgConf.toFixed(0)}%` : '—'}
           </div>
-          <div className="kpi-label">Avg Confidence</div>
+          <div className="kpi-label">Average confidence</div>
         </div>
       </div>
 
       {accStats && accStats.confidence_stats.filter(c => c.total > 0).length > 0 && (
         <>
-          <div className="section-title">Accuracy by Confidence</div>
+          <div className="section-title">Results by confidence</div>
           <div className="bucket-list">
             {accStats.confidence_stats.filter(c => c.total > 0).map(c => (
               <div key={c.bucket} className="bucket-row">
@@ -1132,9 +1249,9 @@ function TrackPage() {
             <thead>
               <tr>
                 <th>Event</th>
-                <th>CCY</th>
+                <th>Currency</th>
                 <th>Direction</th>
-                <th>Conf</th>
+                <th>Confidence</th>
                 <th>Result</th>
                 <th>Date</th>
               </tr>
@@ -1150,8 +1267,8 @@ function TrackPage() {
                   <td className="ledger-conf">{item.confidence_pct.toFixed(0)}%</td>
                   <td className="ledger-result">
                     {item.was_correct
-                      ? <span className="badge badge-buy">W</span>
-                      : <span className="badge badge-sell">L</span>
+                      ? <span className="badge badge-buy">Correct</span>
+                      : <span className="badge badge-sell">Incorrect</span>
                     }
                   </td>
                   <td className="ledger-date">{item.date ? formatDate(item.date) : '—'}</td>
@@ -1178,14 +1295,57 @@ export default function App() {
     return () => clearInterval(id)
   }, [])
 
+  const pageCopy: Record<Page, { title: string; description: string }> = {
+    home: {
+      title: 'Market overview',
+      description: 'A clear look at the next major economic release.',
+    },
+    calendar: {
+      title: 'Economic calendar',
+      description: 'Upcoming U.S. releases, expectations, and results.',
+    },
+    model: {
+      title: 'Forecast insights',
+      description: 'See how forecasts are learning and performing over time.',
+    },
+    track: {
+      title: 'Your forecast history',
+      description: 'Review past calls, outcomes, and confidence at a glance.',
+    },
+  }
+  const localDateTime = new Intl.DateTimeFormat(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(now))
+
   return (
     <div className="app">
       <div className="layout">
         <SideNav page={page} setPage={setPage} />
 
         <div className="content">
+          <header className="workspace-header">
+            <div className="workspace-heading">
+              <div className="mobile-brand">
+                <img src="/logo.png" alt="" />
+                <span>TitanFX Sage</span>
+              </div>
+              <h1>{pageCopy[page].title}</h1>
+              <p>{pageCopy[page].description}</p>
+            </div>
+            <div className="local-clock">
+              <span className="local-clock-icon" aria-hidden="true">◷</span>
+              <span>
+                <small>YOUR LOCAL TIME</small>
+                <strong>{localDateTime}</strong>
+              </span>
+            </div>
+          </header>
           <main>
-            {page === 'home' && <HomePage now={now} />}
+            {page === 'home' && <HomePage now={now} onOpenCalendar={() => setPage('calendar')} />}
             {page === 'calendar' && <CalendarPage />}
             {page === 'model' && <ModelPage />}
             {page === 'track' && <TrackPage />}

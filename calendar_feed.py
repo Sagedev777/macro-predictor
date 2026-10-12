@@ -276,12 +276,12 @@ def _record_consensus_snapshots(
             if latest is not None and actual is not None:
                 if latest.actual is None:
                     latest.actual = actual
+                    latest.actual_first_seen_at = captured_at
+                    latest.actual_source = event.get("source") or "unknown"
                 if explicit_revision is not None:
                     latest.previous_revised = explicit_revision
                 elif previous is not None and previous != latest.previous:
                     latest.previous_revised = previous
-                latest.data_as_of = data_as_of
-                latest.source = event.get("source") or "cache"
 
             if release_at <= captured_at:
                 continue
@@ -314,6 +314,11 @@ def _record_consensus_snapshots(
                     else previous if previous_changed else None
                 ),
                 actual=actual,
+                actual_first_seen_at=captured_at if actual is not None else None,
+                actual_source=(
+                    (event.get("source") or "unknown")
+                    if actual is not None else None
+                ),
                 source=event.get("source") or "forex_factory",
             ))
         db.commit()
@@ -478,7 +483,11 @@ def fetch_calendar_events(force_refresh: bool = False) -> list[dict]:
     fetch_succeeded = False
     rate_limited = False
 
-    for url in FF_URLS:
+    urls_to_fetch = (
+        FF_URLS[:1] if _has_unreleased_numeric_usd_event(cached_events, now)
+        else FF_URLS
+    )
+    for url in urls_to_fetch:
         try:
             r = requests.get(url, headers=headers, timeout=12)
             if r.status_code == 429:

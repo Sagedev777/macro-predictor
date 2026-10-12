@@ -284,8 +284,10 @@ class ConsensusSnapshotTests(unittest.TestCase):
         }
 
         request_offsets = []
+        requested_urls = []
 
         def success_response(url, **_kwargs):
+            requested_urls.append(url)
             if "thisweek" in url:
                 request_offsets.append((clock[0] - release_time) / 60)
             return SimpleNamespace(
@@ -306,19 +308,22 @@ class ConsensusSnapshotTests(unittest.TestCase):
         print(f"calendar fetch offsets from release: {request_offsets}")
         expected_offsets = [-15.0] + [step / 2 for step in range(-6, 31)]
         self.assertEqual(request_offsets, expected_offsets)
-        self.assertEqual(request.call_count, 76)
+        self.assertEqual(request.call_count, 39)
+        self.assertEqual(
+            requested_urls.count(calendar_feed.FF_URLS[1]),
+            1,
+        )
         baseline_requests_per_hour = (
             len(calendar_feed.FF_URLS) * 3600 / calendar_feed.CACHE_TTL_SECONDS
         )
         release_window_requests_per_hour = (
-            len(calendar_feed.FF_URLS) * 3600
-            / calendar_feed.RELEASE_CACHE_TTL_SECONDS
+            3600 / calendar_feed.RELEASE_CACHE_TTL_SECONDS
         )
-        cron_window_requests_per_hour = len(calendar_feed.FF_URLS) * 60
+        cron_window_requests_per_hour = 60
         print(
             "simulated 30-minute release window: "
             f"{request.call_count} Forex Factory requests "
-            f"({request.call_count // len(calendar_feed.FF_URLS)} fetches)"
+            f"({len(request_offsets)} fetches; only thisweek during release window)"
         )
         print(
             "shared web+cron cache request rate (one refresh stream): "
@@ -328,6 +333,78 @@ class ConsensusSnapshotTests(unittest.TestCase):
             f"{release_window_requests_per_hour:.0f}/hour if requested every 30 seconds"
         )
         print(f"shared cache path: {calendar_feed.CACHE_FILE}")
+
+    def test_actual_first_seen_provenance_is_set_once_from_fallback(self):
+        from database import ConsensusSnapshot
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        release_time = now - timedelta(minutes=5)
+        release_string = release_time.isoformat() + "Z"
+        original_data_as_of = now - timedelta(minutes=10)
+        calendar_feed._record_consensus_snapshots(
+            [{
+                "event_code": "NFP",
+                "currency": "USD",
+                "release_time_utc": release_string,
+                "forecast": 1.0,
+                "previous": 0.9,
+                "data_as_of": original_data_as_of.isoformat(),
+                "source": "forex_factory",
+            }],
+            captured_at=release_time - timedelta(minutes=1),
+        )
+
+        event = {
+            "event_code": "NFP",
+            "event_name": "Non-Farm Employment Change",
+            "currency": "USD",
+            "release_time_utc": release_string,
+            "forecast": 1.0,
+            "previous": 0.9,
+            "actual": 1.2,
+            "impact": "HIGH",
+        }
+        cache_fetched_at = datetime.now(timezone.utc).timestamp() - 600
+        self.cache_path.write_text(json.dumps({
+            "fetched_at": cache_fetched_at,
+            "retry_after": datetime.now(timezone.utc).timestamp() + 120,
+            "events": [event],
+        }), encoding="utf-8")
+
+        for _ in range(4):
+            with patch.object(calendar_feed.requests, "get") as request:
+                fallback_events = calendar_feed.fetch_calendar_events()
+            request.assert_not_called()
+            self.assertEqual(fallback_events[0]["source"], "fallback")
+
+        db = self.sessions()
+        try:
+            row = (
+                db.query(ConsensusSnapshot)
+                .filter_by(event_code="NFP", release_time_utc=release_string)
+                .one()
+            )
+            self.assertEqual(row.data_as_of, original_data_as_of)
+            self.assertEqual(row.source, "forex_factory")
+            self.assertEqual(row.actual, 1.2)
+            self.assertEqual(row.actual_source, "fallback")
+            self.assertIsNotNone(row.actual_first_seen_at)
+            delay_seconds = (row.actual_first_seen_at - release_time).total_seconds()
+            self.assertGreaterEqual(delay_seconds, 0)
+            print(
+                "actual first-seen: "
+                f"event={row.event_code}, scheduled_release={row.release_time_utc}, "
+                f"actual_first_seen_at={row.actual_first_seen_at.isoformat()}, "
+                f"delay_seconds={delay_seconds:.3f}"
+            )
+            print(
+                "post-fallback row after 3 more fetches: "
+                f"data_as_of={row.data_as_of.isoformat()}, source={row.source}, "
+                f"actual={row.actual}, actual_source={row.actual_source}, "
+                f"actual_first_seen_at={row.actual_first_seen_at.isoformat()}"
+            )
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":
