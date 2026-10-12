@@ -831,7 +831,7 @@
 
 .cal2-table-head {
   display: grid;
-  grid-template-columns: 44px 42px 1fr 12px 54px 54px 54px;
+  grid-template-columns: 48px minmax(120px, 1fr) 12px 62px 62px 62px;
   gap: 6px;
   padding: 4px 10px;
   align-items: center;
@@ -851,7 +851,7 @@
 
 .cal2-row-main {
   display: grid;
-  grid-template-columns: 44px 42px 1fr 12px 54px 54px 54px;
+  grid-template-columns: 48px minmax(120px, 1fr) 12px 62px 62px 62px;
   gap: 6px;
   padding: 10px 10px;
   align-items: center;
@@ -935,6 +935,8 @@
 .status-badge.learning { background: rgba(34,197,94,0.1); color: var(--buy); border: 1px solid rgba(34,197,94,0.25); }
 .status-badge.seeded_only { background: var(--surface-2); color: var(--text-dim); border: 1px solid var(--border); }
 .status-badge.untrained { background: rgba(239,68,68,0.1); color: var(--sell); border: 1px solid rgba(239,68,68,0.25); }
+.status-badge.provisional { background: #f4f8f3; color: #347653; border: 1px solid #dce8dc; }
+.status-badge.warming_up { background: #fbf6eb; color: #8a6c2d; border: 1px solid #efe2bf; }
 
 .model-n {
   font-size: 22px;
@@ -1740,6 +1742,18 @@ main {
   .home-card { padding: 20px 17px; }
   .home-no-event { min-height: 300px; padding: 25px 18px; }
   .section-title { margin-top: 23px; font-size: 14px; }
+  .cal2-table-head,
+  .cal2-row-main {
+    grid-template-columns: 40px minmax(95px, 1fr) 9px repeat(3, 45px);
+    gap: 4px;
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+  .cal2-name { font-size: 11px; }
+  .cal2-num,
+  .cal2-actual { font-size: 10px; }
+  .gold-history-wrap { overflow-x: auto; }
+  .gold-history-table { min-width: 850px; }
 }
 
 @media (min-width: 768px) {
@@ -1778,7 +1792,8 @@ main {
 
 .evidence-card,
 .pair-outlook,
-.entry-reference {
+.entry-reference,
+.gold-outlook {
   width: 100%;
   margin: 0 0 13px;
   padding: 17px;
@@ -1848,6 +1863,93 @@ main {
 .evidence-weight { color: #617268; font-size: 10px; white-space: nowrap; }
 .evidence-disclaimer { font-size: 10px; }
 
+.gold-direction {
+  margin-top: 13px;
+  color: #59685e;
+  font-size: 20px;
+  font-weight: 750;
+}
+
+.gold-direction.bullish { color: #26744a; }
+.gold-direction.bearish { color: #a74740; }
+.gold-direction.neutral { color: #66736b; }
+
+.gold-probabilities {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.gold-probabilities > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px;
+  border-radius: 10px;
+  background: #f5f8f4;
+  text-transform: capitalize;
+}
+
+.gold-probabilities span { color: var(--text-dim); font-size: 11px; }
+.gold-probabilities strong { color: var(--text); font-size: 17px; }
+
+.gold-outcome-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 15px;
+  margin-top: 10px;
+  color: #40564a;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.gold-warmup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 11px 12px;
+  border-radius: 10px;
+  background: #f5f8f4;
+}
+
+.gold-warmup strong { color: #40564a; font-size: 12px; }
+.gold-warmup span { color: var(--text-dim); font-size: 11px; line-height: 1.5; }
+.gold-validation-note,
+.gold-feature-count { margin: 8px 0 0; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
+
+.gold-history-horizons {
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.gold-history-table td {
+  vertical-align: top;
+}
+
+.gold-input-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.gold-input-row {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px;
+  border: 1px solid #edf1ec;
+  border-radius: 9px;
+}
+
+.gold-input-row strong { color: var(--text); font-size: 11px; text-transform: capitalize; }
+.gold-input-row span { color: #40564a; font-size: 12px; font-weight: 700; }
+.gold-input-row small { color: var(--text-dim); font-size: 9px; overflow-wrap: anywhere; }
+
 .pair-chip-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
@@ -1915,7 +2017,8 @@ main {
 
 .cal-detail .evidence-card,
 .cal-detail .pair-outlook,
-.cal-detail .entry-reference {
+.cal-detail .entry-reference,
+.cal-detail .gold-outlook {
   margin-top: 11px;
 }
 

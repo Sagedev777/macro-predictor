@@ -157,6 +157,7 @@ def fetch_ohlc(
         "symbol":     symbol,
         "interval":   interval,
         "outputsize": bars,
+        "timezone":   "UTC",
         "apikey":     TWELVE_DATA_KEY,
         "format":     "JSON",
     }
@@ -787,6 +788,17 @@ def fetch_and_record_price_reactions(
             row.status = status_val
             row.fetched_at = datetime.now(timezone.utc).replace(tzinfo=None)
             db.commit()
+            if sym == "XAUUSD" and status_val == "ok":
+                try:
+                    from gold_model import record_gold_outcome
+
+                    record_gold_outcome(db, release_time_utc, df)
+                except Exception:
+                    log.exception(
+                        "Could not persist gold outcome for %s at %s",
+                        event_code,
+                        release_time_utc,
+                    )
 
         successful_symbols = sum(
             symbol.get("status") == "ok" for symbol in symbol_data.values()

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import pickle
 import os
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -30,6 +32,30 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
+
+
+def stable_release_moment_id(release_time_utc: str, event_codes) -> str:
+    """Build a canonical release ID from its UTC time and constituent events."""
+    release_time = datetime.fromisoformat(
+        release_time_utc.replace("Z", "+00:00")
+    )
+    if release_time.tzinfo is None:
+        release_time = release_time.replace(tzinfo=timezone.utc)
+    canonical_time = release_time.astimezone(timezone.utc).isoformat(
+        timespec="microseconds"
+    )
+    canonical_codes = sorted({
+        str(code).strip().upper()
+        for code in event_codes
+        if code is not None and str(code).strip()
+    })
+    identity = json.dumps(
+        [canonical_time, canonical_codes],
+        separators=(",", ":"),
+    )
+    return "usd-xau-v1|" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 DATABASE_URL = os.getenv(
     "MACRO_PREDICTOR_DATABASE_URL", "sqlite:///macro_predictor.db"
 )
@@ -171,6 +197,45 @@ class ConsensusSnapshot(Base):
     source           = Column(String(100), nullable=False)
 
 
+class GoldForecast(Base):
+    """Point-in-time XAU/USD forecast and market outcome per release moment."""
+    __tablename__ = "gold_forecasts"
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    release_moment_id   = Column(String(100), nullable=True, unique=True, index=True)
+    release_time_utc    = Column(String(50), nullable=False, unique=True, index=True)
+    event_family        = Column(String(30), nullable=False)
+    event_codes_json    = Column(Text, nullable=False)
+    event_names_json    = Column(Text, nullable=False)
+    created_at          = Column(DateTime, nullable=False, default=datetime.utcnow)
+    horizon_minutes     = Column(Integer, nullable=False, default=5)
+    feature_snapshot    = Column(Text, nullable=False)
+    model_features      = Column(Text, nullable=False)
+    forecast_status     = Column(String(20), nullable=False, default="warming_up")
+    forecast_direction  = Column(String(10), nullable=True)
+    probabilities_json  = Column(Text, nullable=True)
+    expected_move_pct   = Column(Float, nullable=True)
+    n_trained           = Column(Integer, nullable=False, default=0)
+    training_class_counts_json = Column(Text, nullable=True)
+    threshold_pct       = Column(Float, nullable=True)
+    gold_price_at_release = Column(Float, nullable=True)
+    gold_change_1m_pct  = Column(Float, nullable=True)
+    gold_change_5m_pct  = Column(Float, nullable=True)
+    gold_change_15m_pct = Column(Float, nullable=True)
+    gold_change_30m_pct = Column(Float, nullable=True)
+    max_up_5m_pct       = Column(Float, nullable=True)
+    max_down_5m_pct     = Column(Float, nullable=True)
+    max_favorable_5m_pct = Column(Float, nullable=True)
+    max_adverse_5m_pct  = Column(Float, nullable=True)
+    outcome_label       = Column(String(10), nullable=True)
+    outcome_threshold_pct = Column(Float, nullable=True)
+    actual_release_json = Column(Text, nullable=True)
+    outcome_data_quality_json = Column(Text, nullable=True)
+    outcome_status      = Column(String(20), nullable=False, default="pending")
+    outcome_recorded_at = Column(DateTime, nullable=True)
+    model_version       = Column(String(20), nullable=False, default="gold_arf_v1")
+
+
 class AlertLog(Base):
     __tablename__ = "alert_logs"
 
@@ -196,6 +261,21 @@ class ReleaseMomentTraining(Base):
     claimed_at       = Column(DateTime, nullable=False, default=datetime.utcnow)
     trained_at       = Column(DateTime, nullable=True)
     n_predictions    = Column(Integer, nullable=False, default=0)
+
+
+class GoldModelTraining(Base):
+    """
+    Cross-process idempotency ledger for gold model learning.
+    One row per release_time_utc — claimed before training, marked trained after.
+    Prevents duplicate gold model learning when the scheduler restarts or two
+    processes coincide.
+    """
+    __tablename__ = "gold_model_training"
+
+    release_time_utc = Column(String(50), primary_key=True)
+    claimed_at       = Column(DateTime, nullable=False, default=datetime.utcnow)
+    trained_at       = Column(DateTime, nullable=True)
+    n_examples       = Column(Integer, nullable=False, default=0)
 
 
 # ── New tables — multi-currency upgrade ───────────────────────────────────────
@@ -245,6 +325,8 @@ class CotSnapshot(Base):
 
     id              = Column(Integer, primary_key=True, autoincrement=True)
     report_date     = Column(String(10), nullable=False)   # YYYY-MM-DD
+    captured_at     = Column(DateTime, nullable=True, default=datetime.utcnow)
+    published_at    = Column(DateTime, nullable=True)
     currency        = Column(String(3), nullable=False)
     net_long        = Column(Integer, nullable=True)       # raw contracts
     open_interest   = Column(Integer, nullable=True)
@@ -328,6 +410,45 @@ def init_db():
 
     with engine.begin() as conn:
         _add_column_if_missing(
+            conn, "gold_forecasts", "release_moment_id", "VARCHAR(100)"
+        )
+        _add_column_if_missing(
+            conn, "gold_forecasts", "outcome_data_quality_json", "TEXT"
+        )
+        gold_rows = conn.execute(text(
+            "SELECT id, release_time_utc, event_codes_json, release_moment_id "
+            "FROM gold_forecasts"
+        )).fetchall()
+        for row in gold_rows:
+            try:
+                event_codes = json.loads(row.event_codes_json or "[]")
+            except (TypeError, ValueError):
+                event_codes = []
+            moment_id = stable_release_moment_id(
+                row.release_time_utc,
+                event_codes if isinstance(event_codes, list) else [],
+            )
+            if row.release_moment_id == moment_id:
+                continue
+            conn.execute(
+                text(
+                    "UPDATE gold_forecasts SET release_moment_id = :moment_id "
+                    "WHERE id = :row_id"
+                ),
+                {
+                    "moment_id": moment_id,
+                    "row_id": row.id,
+                },
+            )
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_gold_forecasts_release_moment "
+            "ON gold_forecasts (release_moment_id)"
+        ))
+
+        _add_column_if_missing(conn, "cot_snapshots", "captured_at", "DATETIME")
+        _add_column_if_missing(conn, "cot_snapshots", "published_at", "DATETIME")
+        _add_column_if_missing(
             conn, "consensus_snapshots", "data_as_of", "DATETIME"
         )
         _add_column_if_missing(
@@ -390,6 +511,16 @@ def init_db():
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_logs_release_type "
             "ON alert_logs (event_code, release_time_str, alert_type) "
             "WHERE release_time_str IS NOT NULL"
+        ))
+
+        # ── GoldModelTraining: safe creation if table doesn't exist yet ──────
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS gold_model_training ("
+            "release_time_utc VARCHAR(50) PRIMARY KEY,"
+            "claimed_at DATETIME NOT NULL,"
+            "trained_at DATETIME,"
+            "n_examples INTEGER NOT NULL DEFAULT 0"
+            ")"
         ))
 
 

@@ -21,6 +21,7 @@ interface CalEvent {
   impact: 'HIGH' | 'MEDIUM' | 'LOW'
   is_simultaneous: boolean
   prediction?: PredSummary | null
+  gold_forecast?: GoldForecast | null
 }
 
 interface PredSummary {
@@ -29,19 +30,68 @@ interface PredSummary {
   explanation?: string
   confidence_pct: number
   composite_score: number
-  trade_signals: string[]
-  pair_signals: PairSignal[]
-  order_suggestions?: OrderSug[]
   indicators?: Indicator[]
+  gold_forecast?: GoldForecast | null
 }
 
-interface PairSignal { pair: string; direction: string; bias: number; confidence_pct: number }
+interface GoldFeatureInput {
+  value: number | null
+  source: string
+  observed_at: string | null
+  published_at: string | null
+  captured_at: string
+  available_at?: string | null
+  staleness_status?: string
+  revision_status?: string
+  status: string
+}
 
-interface OrderSug {
-  pair: string; bias: string; current_price: number | null
-  atr_14?: number | null
-  suggested_entry: number | null; suggested_sl: number | null; suggested_tp: number | null
-  confidence_pct: number
+interface GoldForecast {
+  release_moment_id?: string
+  release_time_utc?: string
+  forecast_cutoff_utc?: string | null
+  status: string
+  confidence_status?: string
+  direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | null
+  predicted_direction?: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | null
+  probabilities: { bullish: number; bearish: number; neutral: number } | null
+  p_bullish?: number | null
+  p_bearish?: number | null
+  p_neutral?: number | null
+  expected_return_5m?: number | null
+  expected_move_pct: number | null
+  horizon_minutes: number
+  n_trained: number
+  threshold_pct: number | null
+  event_family: string
+  missing_features?: string[]
+  feature_provenance?: Record<string, GoldFeatureInput>
+  feature_coverage?: { available: number; total: number; inputs: Record<string, GoldFeatureInput> }
+  validation_note: string
+  out_of_sample_performance?: {
+    overall: { n: number; accuracy_pct: number | null; brier_score: number | null }
+    by_event_family: Record<string, { n: number; accuracy_pct: number | null; brier_score: number | null }>
+  }
+  outcome?: {
+    label: string | null
+    gold_price_at_release: number | null
+    change_1m_pct: number | null
+    change_5m_pct: number | null
+    change_15m_pct: number | null
+    change_30m_pct: number | null
+    max_up_5m_pct: number | null
+    max_down_5m_pct: number | null
+    max_favorable_5m_pct: number | null
+    max_adverse_5m_pct: number | null
+    threshold_pct: number | null
+    data_quality?: {
+      source?: string
+      price_type?: string
+      status?: string
+      missing_targets?: string[]
+    }
+    actual_releases: { event_code: string; forecast: number | null; previous: number | null; previous_revised: number | null; actual: number | null }[]
+  } | null
 }
 
 interface Indicator {
@@ -61,25 +111,27 @@ interface ModelStatus {
   status: 'learning' | 'seeded_only' | 'untrained'
 }
 
-interface AccTrendWindow {
-  window_start: number; window_end: number; predictions: number
-  wins: number; hit_rate_pct: number; date_from: string | null; date_to: string | null
+interface GoldModelStatus {
+  model: string
+  model_version: string
+  horizon_minutes: number
+  status: string
+  n_forecasts: number
+  n_trained: number
+  n_outcomes: number
+  training_class_counts: Record<string, number>
+  probabilities_available: boolean
+  expected_return_5m_status: string
 }
 
-interface AccTrendCcy {
-  currency: string; total_graded: number; windows: AccTrendWindow[]; improving: boolean
-}
-
-interface HistItem {
-  id: number; event_code: string; display_name: string; currency: string
-  lean_direction: string; confidence_pct: number; forecast: number | null
-  actual: number | null; surprise: number | null; was_correct: boolean; date: string | null
-  is_late?: boolean; weight_shift?: string | null
-}
-
-interface AccStats {
-  total_predictions: number; wins: number; losses: number; overall_hit_rate: number
-  confidence_stats: { bucket: string; total: number; wins: number; hit_rate_pct: number }[]
+interface DataQualityStatus {
+  gold: {
+    forecast_count: number
+    outcome_count: number
+    forecasts_without_outcomes: number
+    unavailable_outcomes: number
+    limitations: string[]
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -125,50 +177,10 @@ function directionClass(d: string): 'bull' | 'bear' | 'flat' {
   return 'flat'
 }
 
-function directionLabel(d: string): string {
-  const u = d?.toUpperCase()
-  if (u === 'BEAT' || u === 'BULLISH') return 'BULLISH'
-  if (u === 'MISS' || u === 'BEARISH') return 'BEARISH'
-  return 'INLINE'
-}
-
 function confBarClass(pct: number): string {
   if (pct >= 70) return 'hi'
   if (pct >= 50) return 'mid'
   return 'lo'
-}
-
-function formatPairSignal(raw: string): { dir: string; pair: string } {
-  const parts = raw.trim().split(' ')
-  const dir = parts[0] ?? ''
-  const sym = (parts[1] ?? '').toUpperCase()
-  const fmtSym = sym.includes('/')
-    ? sym
-    : sym.length === 6
-      ? `${sym.slice(0, 3)}/${sym.slice(3)}`
-      : sym
-  return { dir, pair: fmtSym }
-}
-
-const USD_MAJORS = ['EUR/USD','GBP/USD','USD/JPY','USD/CHF','AUD/USD','USD/CAD','XAU/USD']
-
-function buildPairsFromPred(pred: PredSummary): { dir: string; pair: string }[] {
-  const signals = pred.trade_signals ?? []
-  if (signals.length > 0) {
-    return signals
-      .filter(s => s && !s.toUpperCase().startsWith('WAIT') && !s.toUpperCase().startsWith('HOLD'))
-      .map(formatPairSignal)
-      .filter(p => p.dir && p.pair && USD_MAJORS.includes(p.pair))
-  }
-  // Fallback: use pair_signals but only for the 7 USD majors
-  return (pred.pair_signals ?? [])
-    .filter(ps => USD_MAJORS.includes(ps.pair?.replace('/', '') === ps.pair
-      ? `${ps.pair.slice(0,3)}/${ps.pair.slice(3)}` : ps.pair))
-    .slice(0, 7)
-    .map(ps => ({
-      dir: (ps.direction ?? '').toUpperCase().includes('BUY') || (ps.direction ?? '').toUpperCase() === 'BULLISH' ? 'BUY' : 'SELL',
-      pair: ps.pair?.length === 6 ? `${ps.pair.slice(0,3)}/${ps.pair.slice(3)}` : ps.pair
-    }))
 }
 
 function indicatorAlignment(pred: PredSummary) {
@@ -184,48 +196,6 @@ function indicatorAlignment(pred: PredSummary) {
     aligned: aligned.length,
     weightedPercent: activeWeight > 0 ? Math.round((alignedWeight / activeWeight) * 100) : null,
   }
-}
-
-function formatPair(pair: string): string {
-  const normalized = pair.replace('/', '').toUpperCase()
-  return normalized.length === 6
-    ? `${normalized.slice(0, 3)}/${normalized.slice(3)}`
-    : pair
-}
-
-function PairOutlook({ prediction }: { prediction: PredSummary }) {
-  const scenarioPairs = buildPairsFromPred(prediction)
-  const liveDirectionalPairs = (prediction.pair_signals ?? [])
-    .filter(signal => signal.direction.toUpperCase() !== 'NEUTRAL')
-
-  return (
-    <section className="pair-outlook">
-      <div className="insight-section-heading">Possible FX scenario</div>
-      <p className="insight-section-copy">
-        Configured implications of the release lean, not separate forecasts for each pair.
-      </p>
-      {scenarioPairs.length > 0 ? (
-        <div className="pair-chip-list">
-          {scenarioPairs.map(({ dir, pair }) => (
-            <div key={pair} className={`pair-chip ${dir.toUpperCase() === 'BUY' ? 'bull' : 'bear'}`}>
-              <span>{dir.toUpperCase() === 'BUY' ? 'Buy' : 'Sell'}</span>
-              <strong>{formatPair(pair)}</strong>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="insight-section-copy">No configured pair scenario is available for this event.</p>
-      )}
-      <div className="pair-model-note">
-        <strong>Separate pair model:</strong>{' '}
-        {liveDirectionalPairs.length > 0
-          ? liveDirectionalPairs.map(signal =>
-              `${formatPair(signal.pair)} ${signal.direction.toLowerCase()} (${signal.confidence_pct.toFixed(0)}%)`
-            ).join(' · ')
-          : 'neutral across the tracked pairs right now.'}
-      </div>
-    </section>
-  )
 }
 
 function IndicatorEvidence({ prediction }: { prediction: PredSummary }) {
@@ -282,39 +252,153 @@ function IndicatorEvidence({ prediction }: { prediction: PredSummary }) {
   )
 }
 
-function EntryReference({ suggestions }: { suggestions?: OrderSug[] }) {
-  const entry = suggestions?.find(suggestion =>
-    suggestion.suggested_entry != null && suggestion.bias.toUpperCase() !== 'NEUTRAL'
-  )
+function GoldOutlook({ forecast }: { forecast?: GoldForecast | null }) {
+  const [showEvidence, setShowEvidence] = useState(false)
+  if (!forecast) return null
+  const inputs = Object.entries(forecast.feature_coverage?.inputs ?? {})
+  const familyPerformance = forecast.out_of_sample_performance?.by_event_family[forecast.event_family]
+  const label = (key: string) => key
+    .replace(/^consensus_/, 'Consensus · ')
+    .replace(/^gold_/, 'Gold · ')
+    .replace(/^stored_/, '')
+    .replaceAll('_', ' ')
 
   return (
-    <section className="entry-reference">
-      <div className="insight-section-heading">Optional ATR reference levels</div>
-      {entry ? (
+    <section className="gold-outlook">
+      <div className="insight-section-heading">Gold reaction forecast · XAU/USD</div>
+      <p className="insight-section-copy">
+        Separate from the USD economic-number lean. {forecast.event_family.toUpperCase()} ·
+        {' '}primary horizon: {forecast.horizon_minutes} minutes after release.
+      </p>
+      <p className="gold-feature-count">
+        Forecast cutoff: {forecast.forecast_cutoff_utc ?? 'not recorded'}
+        {' · '}status: {(forecast.confidence_status ?? forecast.status).replaceAll('_', ' ')}
+      </p>
+      {forecast.probabilities ? (
         <>
-          <div className="entry-reference-heading">
-            <strong>{entry.bias.toUpperCase()} {formatPair(entry.pair)}</strong>
-            {entry.current_price != null && <span>Current price {fmtNum(entry.current_price, 5)}</span>}
+          <div className={`gold-direction ${forecast.direction?.toLowerCase() ?? 'neutral'}`}>
+            {forecast.direction ?? 'NO DIRECTION'}
           </div>
-          <div className="entry-reference-levels">
-            <div><span>Entry reference</span><strong>{fmtNum(entry.suggested_entry, 5)}</strong></div>
-            <div><span>Stop reference</span><strong>{fmtNum(entry.suggested_sl, 5)}</strong></div>
-            <div><span>Target reference</span><strong>{fmtNum(entry.suggested_tp, 5)}</strong></div>
-            {entry.atr_14 != null && <div><span>14-period ATR</span><strong>{fmtNum(entry.atr_14, 5)}</strong></div>}
+          <div className="gold-probabilities">
+            {(['bullish', 'bearish', 'neutral'] as const).map(outcome => (
+              <div key={outcome}>
+                <span>{outcome}</span>
+                <strong>{(forecast.probabilities![outcome] * 100).toFixed(1)}%</strong>
+              </div>
+            ))}
           </div>
-          <p className="evidence-disclaimer">ATR-based planning references only. They do not place an order or predict where price will trade.</p>
+          <div className="gold-outcome-meta">
+            <span>Expected return: {forecast.expected_return_5m == null ? 'not validated' : `${forecast.expected_return_5m.toFixed(3)}%`}</span>
+            <span>Training moments: {forecast.n_trained}</span>
+          </div>
         </>
       ) : (
-        <p className="insight-section-copy">
-          No level is available: the pair model is neutral, or price/ATR data is missing. These levels are calculated only when a directional pair bias and market data are available.
+        <div className="gold-warmup">
+          <strong>Learning from gold reactions</strong>
+          <span>{forecast.n_trained} eligible historical release moments; probabilities are withheld until the training minimum is met.</span>
+        </div>
+      )}
+      {forecast.outcome && (
+        <div className="gold-realized">
+          <strong>Observed gold reaction</strong>
+          {forecast.outcome.label ? (
+            <span>Outcome: {forecast.outcome.label.toLowerCase()} · threshold {forecast.outcome.threshold_pct?.toFixed(3)}%</span>
+          ) : (
+            <span>
+              {forecast.outcome.data_quality?.status === 'unavailable'
+                ? 'Outcome unavailable: required gold candles were not available.'
+                : 'Price recorded; a valid prior-move threshold is not available yet.'}
+            </span>
+          )}
+          <div className="gold-realized-horizons">
+            {[
+              ['1m', forecast.outcome.change_1m_pct],
+              ['5m', forecast.outcome.change_5m_pct],
+              ['15m', forecast.outcome.change_15m_pct],
+              ['30m', forecast.outcome.change_30m_pct],
+            ].map(([horizon, value]) => (
+              <div key={horizon}>
+                <span>{horizon}</span>
+                <b>{typeof value === 'number' ? `${value.toFixed(3)}%` : '—'}</b>
+              </div>
+            ))}
+          </div>
+          <small>
+            Five-minute range: up {forecast.outcome.max_up_5m_pct?.toFixed(3) ?? '—'}% · down {forecast.outcome.max_down_5m_pct?.toFixed(3) ?? '—'}%
+            {forecast.outcome.max_favorable_5m_pct != null && forecast.outcome.max_adverse_5m_pct != null
+              ? ` · favorable ${forecast.outcome.max_favorable_5m_pct.toFixed(3)}% · adverse ${forecast.outcome.max_adverse_5m_pct.toFixed(3)}%`
+              : ''}
+          </small>
+          {forecast.outcome.data_quality?.source && (
+            <small>
+              Price source: {forecast.outcome.data_quality.source}
+              {forecast.outcome.data_quality.price_type ? ` · ${forecast.outcome.data_quality.price_type}` : ''}
+              {forecast.outcome.data_quality.status ? ` · ${forecast.outcome.data_quality.status.replaceAll('_', ' ')}` : ''}
+            </small>
+          )}
+          {forecast.outcome.actual_releases.length > 0 && (
+            <small>
+              First-seen release values: {forecast.outcome.actual_releases
+                .map(release => `${release.event_code} ${release.actual ?? '—'} (forecast ${release.forecast ?? '—'})`)
+                .join(' · ')}
+            </small>
+          )}
+        </div>
+      )}
+      <p className="gold-validation-note">{forecast.validation_note}</p>
+      {familyPerformance && familyPerformance.n > 0 ? (
+        <p className="gold-validation-note">
+          {forecast.event_family.toUpperCase()} out-of-sample: {familyPerformance.n} releases
+          {' · '}{familyPerformance.accuracy_pct?.toFixed(1)}% direction accuracy
+          {' · Brier '}{familyPerformance.brier_score?.toFixed(3)}
+        </p>
+      ) : (
+        <p className="gold-validation-note">
+          No completed out-of-sample evaluation is available for this event type yet.
         </p>
       )}
+      {forecast.feature_coverage && (
+        <>
+          <p className="gold-feature-count">
+            {forecast.feature_coverage.available} of {forecast.feature_coverage.total} captured inputs available
+            {forecast.missing_features && forecast.missing_features.length > 0
+              ? ` · ${forecast.missing_features.length} missing or stale`
+              : ''}
+          </p>
+          <button
+            className="evidence-toggle"
+            onClick={() => setShowEvidence(value => !value)}
+            aria-expanded={showEvidence}
+          >
+            {showEvidence ? 'Hide gold evidence and data status' : 'View gold evidence and data status'}
+          </button>
+          {showEvidence && (
+            <div className="gold-input-list">
+              {inputs.map(([key, item]) => (
+                <div className="gold-input-row" key={key}>
+                  <strong>{label(key)}</strong>
+                  <span>{item.value == null ? 'Unavailable' : item.value.toFixed(4)}</span>
+                  <small>{item.source} · {item.status.replaceAll('_', ' ')}</small>
+                  <small>
+                    Observed: {item.observed_at ?? 'not supplied'}
+                    {' · Published: '}{item.published_at ?? 'not supplied'}
+                  </small>
+                  <small>
+                    Available: {item.available_at ?? item.captured_at}
+                    {' · Revision: '}{(item.revision_status ?? 'unknown').replaceAll('_', ' ')}
+                    {' · Freshness: '}{(item.staleness_status ?? 'unknown').replaceAll('_', ' ')}
+                  </small>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      <p className="evidence-disclaimer">
+        Stored values are never replaced with current values during training. Missing or stale inputs remain explicitly unavailable.
+      </p>
     </section>
   )
-}
-
-function fmtNum(n: number | null, dp = 3): string {
-  return n == null ? '—' : n.toFixed(dp)
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -477,12 +561,11 @@ function HomePage({ now, onOpenCalendar }: { now: number; onOpenCalendar: () => 
     void loadEvents(true)
   }, [loadEvents])
 
-  // Fire warmup + full cycle once after events load
+  // Start cached predictions once after the event calendar loads
   useEffect(() => {
     if (events.length > 0 && !warmupFired.current) {
       warmupFired.current = true
       axios.post(`${API}/predictions/warmup`).catch(() => { /* fire and forget */ })
-      axios.post(`${API}/run-full-cycle`).catch(() => { /* fire and forget */ })
       const timer = setTimeout(() => { void loadEvents() }, 15000)
       return () => clearTimeout(timer)
     }
@@ -550,7 +633,7 @@ function HomePage({ now, onOpenCalendar }: { now: number; onOpenCalendar: () => 
   return (
     <div className="page">
       <div className="home-card">
-        <div className="home-card-kicker">NEXT KEY RELEASE</div>
+        <div className="home-card-kicker">NEXT U.S. RELEASE</div>
         <div className="home-header">
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="home-event-name">{eventName}</div>
@@ -559,9 +642,6 @@ function HomePage({ now, onOpenCalendar }: { now: number; onOpenCalendar: () => 
                 {nextEvent.impact ?? 'MEDIUM'}
               </span>
             </div>
-          </div>
-          <div className="home-ccy-chip">
-            <span>{nextEvent.currency}</span>
           </div>
         </div>
 
@@ -582,7 +662,7 @@ function HomePage({ now, onOpenCalendar }: { now: number; onOpenCalendar: () => 
           {nextEvent.actual != null && (
             <div className="home-meta-item">
               <span className="home-meta-label">Actual</span>
-              <span className="home-meta-value text-bull">{nextEvent.actual}</span>
+              <span className="home-meta-value">{nextEvent.actual}</span>
             </div>
           )}
         </div>
@@ -624,8 +704,7 @@ function HomePage({ now, onOpenCalendar }: { now: number; onOpenCalendar: () => 
         )}
 
         {pred && <IndicatorEvidence prediction={pred} />}
-        {pred && <PairOutlook prediction={pred} />}
-        {pred && <EntryReference suggestions={pred.order_suggestions} />}
+        <GoldOutlook forecast={pred?.gold_forecast ?? nextEvent.gold_forecast} />
         <div className="home-disclaimer">Reference only — not financial advice</div>
       </div>
     </div>
@@ -650,13 +729,6 @@ function CalendarEventRow({ ev, isExpanded, onToggle }: {
     } catch { return '' }
   })()
 
-  const actualColor = (() => {
-    if (ev.actual == null || ev.forecast == null) return 'var(--text)'
-    if (ev.actual > ev.forecast) return 'var(--buy)'
-    if (ev.actual < ev.forecast) return 'var(--sell)'
-    return 'var(--text-dim)'
-  })()
-
   return (
     <div
       className="cal2-row"
@@ -668,12 +740,11 @@ function CalendarEventRow({ ev, isExpanded, onToggle }: {
     >
       <div className="cal2-row-main">
         <span className="cal2-time" style={{ opacity: released ? 0.45 : 1 }}>{timeStr}</span>
-        <span className="ccy-badge" style={{ opacity: released ? 0.45 : 1 }}>{ev.currency}</span>
         <span className="cal2-name" style={{ opacity: released ? 0.45 : 1 }}>{ev.display_name ?? ev.event_name}</span>
         <span style={{ opacity: released ? 0.45 : 1 }}><ImpactDot impact={ev.impact} /></span>
         <span className="cal2-num" style={{ opacity: released ? 0.45 : 1 }}>{ev.forecast != null ? ev.forecast : '—'}</span>
         <span className="cal2-num" style={{ opacity: released ? 0.45 : 1 }}>{ev.previous != null ? ev.previous : '—'}</span>
-        <span className="cal2-actual" style={{ color: ev.actual != null ? actualColor : 'var(--text-dim)' }}>
+        <span className="cal2-actual" style={{ color: ev.actual != null ? 'var(--text)' : 'var(--text-dim)' }}>
           {ev.actual != null ? ev.actual : '—'}
         </span>
       </div>
@@ -693,14 +764,14 @@ function CalendarEventRow({ ev, isExpanded, onToggle }: {
             The rule-based indicator-alignment score is capped at 85%; this is not an 85% chance of being correct.
           </p>
           <IndicatorEvidence prediction={pred} />
-          <PairOutlook prediction={pred} />
-          <EntryReference suggestions={pred.order_suggestions} />
+          <GoldOutlook forecast={ev.gold_forecast ?? pred.gold_forecast} />
         </div>
       )}
 
       {isExpanded && !pred && (
         <div className="cal-detail" onClick={e => e.stopPropagation()}>
           <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>No prediction available</div>
+          <GoldOutlook forecast={ev.gold_forecast} />
         </div>
       )}
     </div>
@@ -794,8 +865,7 @@ function CalendarPage() {
       </div>
       <div className="cal2-table">
         <div className="cal2-table-head">
-          <span className="cal2-time" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Time</span>
-          <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>Currency</span>
+          <span className="cal2-time" style={{ color: 'var(--text-dim)', fontSize: 11 }}>UTC</span>
           <span className="cal2-name" style={{ color: 'var(--text-dim)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Event</span>
           <span />
           <span className="cal2-num" style={{ color: 'var(--text-dim)', fontSize: 11 }}>Forecast</span>
@@ -856,118 +926,27 @@ function CalendarPage() {
 // MODEL PROGRESS PAGE
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Calibration row type (matches /api/calibration array response)
-interface CalibRow {
-  bucket: string
-  stated_midpoint: number
-  actual_win_rate: number
-  count: number
-  flagged: boolean
-}
-
-function TrendChart({ ccy, windows, improving }: { ccy: string; windows: AccTrendWindow[]; improving: boolean }) {
-  const ccyColor = '#347653'
-
-  if (windows.length < 2) {
-    return (
-      <div className="trend-card">
-        <div className="trend-card-head">
-          <span className="ccy-badge">{ccy}</span>
-        </div>
-        <div className="trend-no-data">Not enough data yet</div>
-      </div>
-    )
-  }
-
-  const W = 300
-  const H = 120
-  const PAD = { top: 14, right: 14, bottom: 24, left: 34 }
-  const chartW = W - PAD.left - PAD.right
-  const chartH = H - PAD.top - PAD.bottom
-
-  const xScale = (i: number) => PAD.left + (i / Math.max(windows.length - 1, 1)) * chartW
-  const yScale = (v: number) => PAD.top + chartH - (v / 100) * chartH
-
-  const points = windows.map((w, i) => `${xScale(i)},${yScale(w.hit_rate_pct)}`).join(' ')
-
-  const firstDate = windows[0]?.date_from ? new Date(windows[0].date_from).toLocaleDateString('en-GB', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : ''
-  const lastDate = windows[windows.length - 1]?.date_to ? new Date(windows[windows.length - 1].date_to!).toLocaleDateString('en-GB', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : ''
-
-  return (
-    <div className="trend-card">
-      <div className="trend-card-head">
-        <span className="ccy-badge">{ccy}</span>
-        {improving && <span className="trend-improving">improving</span>}
-      </div>
-      <div className="trend-svg-wrap">
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={120} aria-label={`${ccy} accuracy trend`}>
-          {/* Y-axis grid lines at 0 and 100 */}
-          {([0, 100] as number[]).map(v => (
-            <g key={v}>
-              <line x1={PAD.left} y1={yScale(v)} x2={W - PAD.right} y2={yScale(v)}
-                stroke="#e5ebe3" strokeWidth={1} />
-              <text x={PAD.left - 4} y={yScale(v) + 4} fontSize={8} fill="#758177" textAnchor="end">{v}</text>
-            </g>
-          ))}
-          {/* Baseline at 50% (dashed accent) */}
-          <line x1={PAD.left} y1={yScale(50)} x2={W - PAD.right} y2={yScale(50)}
-            stroke="rgba(52,118,83,0.35)" strokeWidth={1} strokeDasharray="4 3" />
-          <text x={PAD.left - 4} y={yScale(50) + 4} fontSize={8} fill="rgba(52,118,83,0.7)" textAnchor="end">50</text>
-          {/* X tick labels */}
-          {firstDate && (
-            <text x={PAD.left} y={H - 4} fontSize={8} fill="#758177" textAnchor="start">{firstDate}</text>
-          )}
-          {lastDate && windows.length > 1 && (
-            <text x={W - PAD.right} y={H - 4} fontSize={8} fill="#758177" textAnchor="end">{lastDate}</text>
-          )}
-          {/* Polyline */}
-          <polyline
-            points={points}
-            fill="none"
-            stroke={ccyColor}
-            strokeWidth={2}
-            strokeLinejoin="round"
-          />
-          {/* Dots */}
-          {windows.map((w, i) => (
-            <circle
-              key={i}
-              cx={xScale(i)}
-              cy={yScale(w.hit_rate_pct)}
-              r={3}
-              fill={ccyColor}
-            />
-          ))}
-        </svg>
-      </div>
-    </div>
-  )
-}
-
 function ModelPage() {
   const [models,   setModels]   = useState<ModelStatus[]>([])
-  const [trend,    setTrend]    = useState<AccTrendCcy[]>([])
-  const [mistakes, setMistakes] = useState<HistItem[]>([])
-  const [calibration, setCalib] = useState<CalibRow[]>([])
+  const [goldStatus, setGoldStatus] = useState<GoldModelStatus | null>(null)
+  const [dataQuality, setDataQuality] = useState<DataQualityStatus | null>(null)
   const [loading,  setLoading]  = useState(true)
+  const [loadError, setLoadError] = useState(false)
 
   useEffect(() => {
     setLoading(true)
     Promise.all([
       axios.get(`${API}/model-status`),
-      axios.get(`${API}/accuracy-trend`),
-      axios.get(`${API}/history?limit=60`),
-      axios.get(`${API}/calibration`),
+      axios.get(`${API}/gold/model-status`),
+      axios.get(`${API}/data-quality`),
     ])
-      .then(([ms, at, hist, calib]) => {
-        setModels(ms.data.currencies ?? [])
-        setTrend(at.data.trend ?? [])
-        // filter wrong predictions only
-        const allHist: HistItem[] = hist.data.history ?? []
-        setMistakes(allHist.filter(h => h.was_correct === false))
-        setCalib(Array.isArray(calib.data) ? calib.data : [])
+      .then(([ms, gold, quality]) => {
+        setModels((ms.data.currencies ?? []).filter((model: ModelStatus) => model.currency === 'USD'))
+        setGoldStatus(gold.data)
+        setDataQuality(quality.data)
+        setLoadError(false)
       })
-      .catch(() => {})
+      .catch(() => setLoadError(true))
       .finally(() => setLoading(false))
   }, [])
 
@@ -982,90 +961,70 @@ function ModelPage() {
   return (
     <div className="page">
 
-      {/* ── SECTION 1: Accuracy Trend ──────────────────────────────────── */}
-      <div className="section-title">Forecast accuracy</div>
-      {trend.filter(t => t.currency !== 'ALL').length === 0 ? (
-        <div className="empty-state"><p>No trend data available yet.</p></div>
-      ) : (
-        <div className="trend-charts-grid">
-          {trend.filter(t => t.currency !== 'ALL').map(t => (
-            <TrendChart key={t.currency} ccy={t.currency} windows={t.windows} improving={t.improving} />
-          ))}
+      <div className="section-title">XAU/USD reaction model</div>
+      {loadError && <div className="empty-state"><p>Some model details could not be loaded. Please refresh to try again.</p></div>}
+      {goldStatus && (
+        <div className="model-card gold-model-status">
+          <div className="model-card-head">
+            <strong>{goldStatus.model}</strong>
+            <span className={`status-badge ${goldStatus.status}`}>
+              {goldStatus.status === 'provisional' ? 'Provisional' : 'Warming up'}
+            </span>
+          </div>
+          <div className="model-n">{goldStatus.n_trained} eligible training moments</div>
+          <div className="model-n-sub">
+            {goldStatus.n_outcomes} recorded outcomes · {goldStatus.horizon_minutes}-minute primary horizon · {goldStatus.model_version}
+          </div>
+          <div className="gold-outcome-meta">
+            {Object.entries(goldStatus.training_class_counts).map(([label, count]) => (
+              <span key={label}>{label.toLowerCase()}: {count}</span>
+            ))}
+          </div>
+          <p className="gold-validation-note">
+            {goldStatus.probabilities_available
+              ? 'Probabilities are available but remain provisional until validated out of sample.'
+              : 'Probabilities are withheld until the training sample contains enough release moments from each class.'}
+            {' '}Expected return: {goldStatus.expected_return_5m_status.replaceAll('_', ' ')}.
+          </p>
+        </div>
+      )}
+      {dataQuality && (
+        <div className="model-card">
+          <div className="model-card-head"><strong>Gold price data quality</strong></div>
+          <div className="model-n-sub">
+            {dataQuality.gold.outcome_count}/{dataQuality.gold.forecast_count} forecasts have recorded outcomes;
+          {' '}{dataQuality.gold.unavailable_outcomes} outcome fetches are marked unavailable.
+          </div>
+          {dataQuality.gold.limitations.map(item => <p key={item}>{item}</p>)}
         </div>
       )}
 
-      {/* ── SECTION 2: n_trained per currency ─────────────────────────── */}
-      <div className="section-title">Learning progress</div>
+      <div className="section-title">USD economic release model</div>
+      <p className="gold-validation-note">
+        This model estimates whether a U.S. release will beat or miss consensus. It does not forecast gold direction.
+      </p>
       {models.length === 0 ? (
-        <div className="empty-state"><p>No model data available.</p></div>
+        <div className="empty-state"><p>USD release-model status is not available yet.</p></div>
       ) : (
         <div className="model-grid">
           {models.map(m => (
             <div key={m.currency} className="model-card">
               <div className="model-card-head">
-                <span className="ccy-badge model-ccy">{m.currency}</span>
+                <strong>USD · consensus surprise</strong>
                 <span className={`status-badge ${m.status}`}>
                   {m.status === 'learning' ? 'Learning' : m.status === 'seeded_only' ? 'Getting started' : 'Not started'}
                 </span>
               </div>
-              <div className="model-n">{m.n_trained} release moments</div>
+              <div className="model-n">{m.n_trained} training observations</div>
               <div className="model-n-sub">
-                {m.n_real > 0 ? `${m.n_real} confirmed outcomes` : 'Building its first track record'}
+                {m.n_real > 0 ? `${m.n_real} recorded release outcomes` : 'No recorded release outcomes yet'}
               </div>
-              {m.live_accuracy != null && (
-                <div className="model-acc">{(m.live_accuracy * 100).toFixed(1)}% accuracy</div>
-              )}
             </div>
           ))}
         </div>
       )}
 
-      {/* ── SECTION 3: Mistake Log ────────────────────────────────────── */}
-      <div className="section-title">Forecasts to review</div>
-      {mistakes.length === 0 ? (
-        <div className="empty-state"><p>No wrong predictions recorded yet.</p></div>
-      ) : (
-        <div className="mistake-list">
-          {mistakes.map(h => {
-            const date = h.date ? new Date(h.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'
-            const surprise = h.surprise != null
-              ? (h.surprise > 0 ? `+${h.surprise}` : `${h.surprise}`)
-              : '—'
-            const outcome = h.actual != null && h.forecast != null
-              ? (h.actual > h.forecast ? 'BEAT' : h.actual < h.forecast ? 'MISS' : 'INLINE')
-              : '—'
-            return (
-              <div key={h.id} className="mistake-row">
-                <div className="mistake-header">
-                  <span className="mistake-name">{h.display_name}</span>
-                  <span className="mistake-date">{date}</span>
-                </div>
-                <div className="mistake-body">
-                  <div className="mistake-field">
-                    <span className="mistake-label">Predicted</span>
-                    <span className="badge badge-sell">{h.lean_direction}</span>
-                    <span className="mistake-conf">{h.confidence_pct.toFixed(0)}% conf</span>
-                  </div>
-                  <div className="mistake-field">
-                    <span className="mistake-label">Actual outcome</span>
-                    <span className={outcome === 'BEAT' ? 'text-bull' : 'text-bear'}>{outcome}</span>
-                    <span className="mistake-nums">fcst {h.forecast ?? '—'} / actual {h.actual ?? '—'} (surprise {surprise})</span>
-                  </div>
-                  <div className="mistake-field">
-                    <span className="mistake-label">Learning note</span>
-                    <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
-                      {h.weight_shift ?? 'Not enough data \u2014 estimated weights shown after 5 real outcomes'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
-
-      {/* ── SECTION 4: Feature Importance ────────────────────────────── */}
-      <div className="section-title">What influences forecasts</div>
+      <div className="section-title">Inputs used by the USD release model</div>
       {models.length === 0 ? (
         <div className="empty-state"><p>No data.</p></div>
       ) : (
@@ -1098,44 +1057,6 @@ function ModelPage() {
         </div>
       )}
 
-      {/* ── SECTION 5: Calibration Check ─────────────────────────────── */}
-      <div className="section-title">Confidence guide</div>
-      {calibration.length === 0 ? (
-        <div className="empty-state"><p>No graded predictions yet.</p></div>
-      ) : (
-        <div className="calib-card">
-          <div className="calib-table-head">
-            <span>Confidence band</span>
-            <span>Expected</span>
-            <span>Observed</span>
-            <span>Releases</span>
-            <span>Note</span>
-          </div>
-          {calibration.map(row => {
-            const winPct = (row.actual_win_rate * 100).toFixed(1)
-            const diverge = row.flagged
-            return (
-              <div key={row.bucket} className={`calib-row${diverge ? ' calib-flagged' : ''}`}>
-                <span className="calib-bucket">{row.bucket}</span>
-                <span className="calib-expected">~{row.stated_midpoint}%</span>
-                <span className={`calib-pct ${row.actual_win_rate * 100 >= row.stated_midpoint ? 'text-bull' : 'text-bear'}`}>
-                  {winPct}%
-                </span>
-                <span style={{ color: 'var(--text-dim)', fontSize: 13 }}>{row.count}</span>
-                <span className="calib-flag">
-                  {diverge
-                    ? <span className="flag-warn">!</span>
-                    : row.count < 10
-                      ? <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>min 10</span>
-                      : <span style={{ color: 'var(--text-dim)' }}>—</span>
-                  }
-                </span>
-              </div>
-            )
-          })}
-        </div>
-      )}
-
     </div>
   )
 }
@@ -1144,136 +1065,137 @@ function ModelPage() {
 // TRACK RECORD PAGE
 // ══════════════════════════════════════════════════════════════════════════════
 
-type ResultFilter = 'all' | 'wins' | 'losses'
+type GoldResultFilter = 'all' | 'evaluated' | 'unavailable' | 'pending'
 
 function TrackPage() {
-  const [history, setHistory] = useState<HistItem[]>([])
-  const [accStats, setAccStats] = useState<AccStats | null>(null)
+  const [forecasts, setForecasts] = useState<GoldForecast[]>([])
   const [loading, setLoading] = useState(true)
-  const [resultFilter, setResultFilter] = useState<ResultFilter>('all')
+  const [loadError, setLoadError] = useState(false)
+  const [resultFilter, setResultFilter] = useState<GoldResultFilter>('all')
 
-  useEffect(() => {
+  const loadForecasts = useCallback(async () => {
     setLoading(true)
-    Promise.all([
-      axios.get(`${API}/history?limit=60`),
-      axios.get(`${API}/accuracy`),
-    ])
-      .then(([h, a]) => {
-        setHistory(h.data.history ?? [])
-        setAccStats(a.data)
-      })
-      .catch(() => { /* show empty state */ })
-      .finally(() => setLoading(false))
+    try {
+      const response = await axios.get(`${API}/gold/forecasts?limit=100`)
+      setForecasts(response.data.forecasts ?? [])
+      setLoadError(false)
+    } catch {
+      setLoadError(true)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  const ledger = useMemo(() => {
-    if (resultFilter === 'wins') return history.filter(h => h.was_correct)
-    if (resultFilter === 'losses') return history.filter(h => !h.was_correct)
-    return history
-  }, [history, resultFilter])
+  useEffect(() => { void loadForecasts() }, [loadForecasts])
 
-  const wins = useMemo(() => history.filter(h => h.was_correct).length, [history])
-  const winRate = history.length > 0 ? (wins / history.length) * 100 : 0
-  const avgConf = history.length > 0
-    ? history.reduce((s, h) => s + h.confidence_pct, 0) / history.length
-    : 0
+  const outcomeState = (forecast: GoldForecast) => {
+    if (!forecast.outcome) return 'pending'
+    if (forecast.outcome.data_quality?.status === 'unavailable') return 'unavailable'
+    return forecast.outcome.change_5m_pct == null ? 'unavailable' : 'evaluated'
+  }
+  const evaluatedCount = forecasts.filter(forecast => outcomeState(forecast) === 'evaluated').length
+  const unavailableCount = forecasts.filter(forecast => outcomeState(forecast) === 'unavailable').length
+  const pendingCount = forecasts.filter(forecast => outcomeState(forecast) === 'pending').length
+  const ledger = forecasts.filter(forecast => resultFilter === 'all' || outcomeState(forecast) === resultFilter)
+  const filters: { value: GoldResultFilter; label: string; count: number }[] = [
+    { value: 'all', label: 'All', count: forecasts.length },
+    { value: 'evaluated', label: 'Evaluated', count: evaluatedCount },
+    { value: 'unavailable', label: 'Unavailable', count: unavailableCount },
+    { value: 'pending', label: 'Awaiting outcome', count: pendingCount },
+  ]
 
   if (loading) {
     return (
       <div className="page">
-        <div className="loading-center"><Spinner /><span>Loading track record…</span></div>
+        <div className="loading-center"><Spinner /><span>Loading gold reaction history…</span></div>
       </div>
     )
   }
 
   return (
     <div className="page">
-
       <div className="kpi-row">
         <div className="kpi-card">
-          <div className="kpi-value">{history.length}</div>
-          <div className="kpi-label">Predictions</div>
+          <div className="kpi-value">{forecasts.length}</div>
+          <div className="kpi-label">Gold release moments</div>
         </div>
         <div className="kpi-card">
-          <div className={`kpi-value ${winRate >= 60 ? 'green' : winRate >= 50 ? 'yellow' : ''}`}>
-            {history.length > 0 ? `${winRate.toFixed(0)}%` : '—'}
-          </div>
-          <div className="kpi-label">Win Rate</div>
+          <div className="kpi-value green">{evaluatedCount}</div>
+          <div className="kpi-label">Price outcomes evaluated</div>
         </div>
         <div className="kpi-card">
-          <div className="kpi-value yellow">
-            {history.length > 0 ? `${avgConf.toFixed(0)}%` : '—'}
-          </div>
-          <div className="kpi-label">Average confidence</div>
+          <div className="kpi-value yellow">{unavailableCount + pendingCount}</div>
+          <div className="kpi-label">Unavailable or awaiting data</div>
         </div>
       </div>
-
-      {accStats && accStats.confidence_stats.filter(c => c.total > 0).length > 0 && (
-        <>
-          <div className="section-title">Results by confidence</div>
-          <div className="bucket-list">
-            {accStats.confidence_stats.filter(c => c.total > 0).map(c => (
-              <div key={c.bucket} className="bucket-row">
-                <span className="bucket-label">{c.bucket}</span>
-                <span className="bucket-count">{c.total} calls</span>
-                <div className="bucket-bar-outer">
-                  <div className="bucket-bar-inner" style={{ width: `${c.hit_rate_pct}%` }} />
-                </div>
-                <span className="bucket-pct">{c.hit_rate_pct.toFixed(0)}%</span>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
+      <p className="gold-validation-note">
+        This history scores XAU/USD price movement after each release moment. USD BEAT/MISS results are a separate task and are not counted here.
+      </p>
 
       <div className="result-filter" role="group" aria-label="Filter results">
-        {(['all', 'wins', 'losses'] as ResultFilter[]).map(f => (
+        {filters.map(filter => (
           <button
-            key={f}
-            className={`result-filter-btn${resultFilter === f ? ' active' : ''}`}
-            onClick={() => setResultFilter(f)}
-            aria-pressed={resultFilter === f}
+            key={filter.value}
+            className={`result-filter-btn${resultFilter === filter.value ? ' active' : ''}`}
+            onClick={() => setResultFilter(filter.value)}
+            aria-pressed={resultFilter === filter.value}
           >
-            {f === 'all' ? 'All' : f === 'wins' ? 'Wins' : 'Losses'}
+            {filter.label} <span>{filter.count}</span>
           </button>
         ))}
       </div>
 
       {ledger.length === 0 ? (
         <div className="empty-state">
-          <p>{history.length === 0 ? 'No history recorded yet.' : 'No results match this filter.'}</p>
+          <p>{loadError ? 'Gold reaction history is unavailable right now.' : forecasts.length === 0 ? 'No gold release moments have been recorded yet.' : 'No release moments match this filter.'}</p>
+          {loadError && <button className="primary-action" onClick={() => void loadForecasts()}>Try again</button>}
         </div>
       ) : (
-        <div className="ledger-wrap">
-          <table className="ledger-table">
+        <div className="ledger-wrap gold-history-wrap">
+          <table className="ledger-table gold-history-table">
             <thead>
               <tr>
-                <th>Event</th>
-                <th>Currency</th>
-                <th>Direction</th>
-                <th>Confidence</th>
-                <th>Result</th>
-                <th>Date</th>
+                <th>Release · UTC</th>
+                <th>Event group</th>
+                <th>Gold forecast · 5m</th>
+                <th>Observed outcome</th>
+                <th>Gold return · 5m</th>
+                <th>Other horizons</th>
               </tr>
             </thead>
             <tbody>
-              {ledger.map(item => (
-                <tr key={item.id}>
-                  <td className="ledger-event" title={item.display_name}>{item.display_name}</td>
-                  <td style={{ whiteSpace: 'nowrap' }}>{item.currency}</td>
-                  <td className={`ledger-dir ${directionClass(item.lean_direction)}`}>
-                    {directionLabel(item.lean_direction)}
-                  </td>
-                  <td className="ledger-conf">{item.confidence_pct.toFixed(0)}%</td>
-                  <td className="ledger-result">
-                    {item.was_correct
-                      ? <span className="badge badge-buy">Correct</span>
-                      : <span className="badge badge-sell">Incorrect</span>
-                    }
-                  </td>
-                  <td className="ledger-date">{item.date ? formatDate(item.date) : '—'}</td>
-                </tr>
-              ))}
+              {ledger.map((forecast, index) => {
+                const outcome = forecast.outcome
+                const state = outcomeState(forecast)
+                const probs = forecast.probabilities
+                const momentId = forecast.release_moment_id ?? `${forecast.release_time_utc}-${forecast.event_family}-${index}`
+                return (
+                  <tr key={momentId}>
+                    <td className="ledger-date">{forecast.release_time_utc ? `${formatDate(forecast.release_time_utc)} · ${formatTime(forecast.release_time_utc)}` : '—'}</td>
+                    <td>{forecast.event_family.toUpperCase()}</td>
+                    <td>
+                      <span className={`ledger-dir ${directionClass(forecast.direction ?? '')}`}>
+                        {probs ? `${forecast.direction ?? 'No direction'} · Bull ${(probs.bullish * 100).toFixed(0)}% / Bear ${(probs.bearish * 100).toFixed(0)}% / Neutral ${(probs.neutral * 100).toFixed(0)}%` : 'Not issued'}
+                      </span>
+                    </td>
+                    <td>
+                      {state === 'evaluated'
+                        ? outcome?.label ?? 'No label · threshold unavailable'
+                        : state === 'unavailable'
+                          ? 'Price data unavailable'
+                          : 'Awaiting price data'}
+                    </td>
+                    <td className={outcome?.change_5m_pct != null ? directionClass(outcome.change_5m_pct >= 0 ? 'BULLISH' : 'BEARISH') : ''}>
+                      {outcome?.change_5m_pct == null ? '—' : `${outcome.change_5m_pct.toFixed(3)}%`}
+                    </td>
+                    <td className="gold-history-horizons">
+                      1m {outcome?.change_1m_pct == null ? '—' : `${outcome.change_1m_pct.toFixed(3)}%`}
+                      {' · '}15m {outcome?.change_15m_pct == null ? '—' : `${outcome.change_15m_pct.toFixed(3)}%`}
+                      {' · '}30m {outcome?.change_30m_pct == null ? '—' : `${outcome.change_30m_pct.toFixed(3)}%`}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -1306,11 +1228,11 @@ export default function App() {
     },
     model: {
       title: 'Forecast insights',
-      description: 'See how forecasts are learning and performing over time.',
+      description: 'See how the USD and gold forecast systems differ.',
     },
     track: {
-      title: 'Your forecast history',
-      description: 'Review past calls, outcomes, and confidence at a glance.',
+      title: 'Gold reaction history',
+      description: 'Review XAU/USD outcomes after each U.S. release moment.',
     },
   }
   const localDateTime = new Intl.DateTimeFormat(undefined, {

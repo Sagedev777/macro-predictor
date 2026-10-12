@@ -1,17 +1,13 @@
 """
 scheduler.py — Background scheduler for pre-release alerts, post-release grading,
-               River learn_one() calls, daily rate-differential refresh, and
-               48-hour sentiment refresh cycle.
+               USD macro release capture, gold outcomes, and data refresh.
 
 Schedule summary:
   Every 1 min   — check_and_alert_upcoming()   (pre-release + post-release grading)
-  Every 24 hr   — refresh_rate_differentials()  (USD yield spread)
   Every 12 hr   — refresh_sentiment_cycle()     (GDELT + RSS lexicon sentiment)
   Every 168 hr  — refresh_cot_cycle()           (CFTC COT, released Fridays)
-  Every 24 hr   — refresh_currency_strengths()  (full feature vector + River predict)
 
-River learn_one() is called once after every prediction at a release moment has
-been price-graded — not once per event code.
+Legacy non-gold pair-strength refreshes are no longer scheduled.
 """
 
 import json
@@ -26,7 +22,7 @@ from dotenv import load_dotenv
 
 from alerts import BOT_TOKEN, CHAT_ID, send_telegram_alert
 from calendar_feed import fetch_upcoming_red_folder_events
-from config.events import CURRENCIES, get_event_config
+from config.events import get_event_config
 from database import (
     AlertLog,
     PeriodicJobRun,
@@ -311,20 +307,6 @@ def check_and_alert_upcoming():
                             PredictionModel.release_time_utc == rel_str,
                         ).first()
 
-                        # Build pair signals from event config trade_signals
-                        _raw_dir_pre = pred_result.get("lean_direction", "")
-                        _dir_key_pre = (
-                            "BULLISH" if _raw_dir_pre.upper() in ("BEAT", "BULLISH") else
-                            "BEARISH" if _raw_dir_pre.upper() in ("MISS", "BEARISH") else
-                            "INLINE"
-                        )
-                        _trade_signals = event_cfg.get("trade_signals", {}).get(_dir_key_pre, [])
-                        pair_signals = [
-                            {"pair": s.split()[-1], "direction": s.split()[0]}
-                            for s in _trade_signals
-                            if s and not s.upper().startswith("WAIT")
-                        ]
-
                         if not existing:
                             direction = pred_result["lean_direction"]
                             is_late_flag = check_is_late(now_utc, rel_str)
@@ -340,7 +322,6 @@ def check_and_alert_upcoming():
                                 forecast            = ev.get("forecast"),
                                 previous            = ev.get("previous"),
                                 currency            = currency,
-                                pair_signals        = json.dumps(pair_signals),
                                 model_version       = "river_arf_v1",
                                 is_late             = is_late_flag,
                             )
@@ -356,14 +337,25 @@ def check_and_alert_upcoming():
                             save_prediction_feature_snapshot(db, prediction, features)
                             db.commit()
 
-                        # Inject trade_signals from events config into pred_result for Telegram
-                        _raw_dir = pred_result.get("lean_direction", "")
-                        _dir_key = (
-                            "BULLISH" if _raw_dir.upper() in ("BEAT", "BULLISH") else
-                            "BEARISH" if _raw_dir.upper() in ("MISS", "BEARISH") else
-                            "INLINE"
-                        )
-                        pred_result["trade_signals"] = event_cfg.get("trade_signals", {}).get(_dir_key, [])
+                        try:
+                            from gold_model import create_gold_forecast
+
+                            release_group = [
+                                item for item in events
+                                if item.get("release_time_utc") == rel_str
+                            ]
+                            create_gold_forecast(
+                                db,
+                                release_group,
+                                now=now_utc.replace(tzinfo=timezone.utc),
+                            )
+                        except Exception:
+                            log.exception(
+                                "Gold reaction forecast failed for %s at %s",
+                                code,
+                                rel_str,
+                            )
+
                         # Pass forecast/previous through for the new template
                         pred_result.setdefault("forecast", ev.get("forecast"))
                         pred_result.setdefault("previous", ev.get("previous"))
@@ -433,6 +425,11 @@ def check_and_alert_upcoming():
                             db.commit()
                         except Exception as le:
                             log.warning("Failed to persist release grading for %s/%s: %s", code, currency, le)
+                    try:
+                        from gold_model import train_gold_outcome
+                        train_gold_outcome(rel_str)
+                    except Exception as ge:
+                        log.warning("Failed gold model training for %s: %s", rel_str, ge)
                     send_price_result_alert(db, pred)
                     if pred.result_15m == "NO_CLEAR_MOVE":
                         log.info(
@@ -457,31 +454,22 @@ def check_and_alert_upcoming():
                 send_price_result_alert(db, sp)
                 if is_pre_release_prediction(sp):
                     train_release_moment(sp.release_time_utc)
+                    try:
+                        from gold_model import train_gold_outcome
+                        train_gold_outcome(sp.release_time_utc)
+                    except Exception as ge:
+                        log.warning("Failed gold model training for %s: %s", sp.release_time_utc, ge)
+
+        # ── 5. SWEEP PENDING GOLD FORECASTS (>= 35 mins after release) ────────
+        try:
+            process_and_grade_gold_outcomes(db)
+        except Exception as ge:
+            log.warning("process_and_grade_gold_outcomes error: %s", ge)
 
     except Exception as e:
         log.error("check_and_alert_upcoming error: %s", e)
     finally:
         db.close()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DAILY RATE-DIFFERENTIAL REFRESH
-# ══════════════════════════════════════════════════════════════════════════════
-
-def refresh_rate_differentials():
-    """
-    Fetch US Treasury yields and compute the USD rate differential.
-    Runs daily at 06:00 UTC.
-    """
-    try:
-        from data_sources import compute_rate_differentials
-        diffs = compute_rate_differentials()
-        log.info(
-            "Rate differentials refreshed: %s",
-            {ccy: round(d.spread_pct or 0, 3) for ccy, d in diffs.items()},
-        )
-    except Exception as e:
-        log.error("Rate differential refresh failed: %s", e)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -527,76 +515,8 @@ def refresh_cot_cycle():
         log.error("COT refresh failed: %s", e)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FULL CURRENCY STRENGTH REFRESH (daily)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def refresh_currency_strengths():
-    """
-    Build the full 4-feature vector for USD and run River ARF prediction.
-    Persists USD strength snapshot to the DB.
-    Runs daily at 07:00 UTC (after rate-differential refresh at 06:00).
-    """
-    try:
-        from data_sources import rate_diff_to_score, get_all_rate_differentials
-        from sentiment import (
-            get_latest_cot, get_latest_sentiment,
-            cot_to_score, sentiment_to_score,
-        )
-        from indicators import get_indicator_scores_all_currencies, persist_currency_strength
-        from learning import build_features, predict_strength
-
-        rate_diffs       = get_all_rate_differentials()
-        indicator_scores = get_indicator_scores_all_currencies()
-
-        for ccy in CURRENCIES:
-            rd   = rate_diffs.get(ccy)
-            cot  = get_latest_cot(ccy)
-            sent = get_latest_sentiment(ccy)
-
-            ind_score = indicator_scores.get(ccy, 0.0)
-            rd_score  = rate_diff_to_score(rd)
-            c_score   = cot_to_score(cot)
-            s_score   = sentiment_to_score(sent)
-
-            features      = build_features(ind_score, rd_score, c_score, s_score)
-            pred_strength = predict_strength(ccy, features)
-
-            # Use direct composite until River has enough real training data
-            from database import load_river_model as _lrm
-            _, n_trained, _, _ = _lrm(ccy)
-            if (n_trained or 0) < 20:
-                weights = [0.50, 0.25, 0.15, 0.10]
-                scores  = [ind_score, rd_score, c_score, s_score]
-                composite = sum(w * s for w, s in zip(weights, scores))
-                strength_score = round(max(-1.0, min(1.0, composite)), 4)
-                confidence_pct = 40.0 + abs(strength_score) * 25.0
-            else:
-                strength_score = pred_strength.strength_score
-                confidence_pct = pred_strength.confidence_pct
-
-            persist_currency_strength(
-                currency        = ccy,
-                strength_score  = strength_score,
-                indicator_score = ind_score,
-                rate_diff_score = rd_score,
-                cot_score       = c_score,
-                sentiment_score = s_score,
-                confidence_pct  = confidence_pct,
-            )
-            log.info(
-                "Currency strength %s: score=%.3f conf=%.1f%%",
-                ccy, strength_score, confidence_pct,
-            )
-
-    except Exception as e:
-        log.error("Currency strength refresh failed: %s", e)
-
-
 PERIODIC_JOB_CADENCES = {
     "auto_alert_job": "every minute",
-    "rate_diff_job": "daily at 06:00 UTC",
-    "strength_job": "daily at 07:00 UTC",
     "sentiment_job": "daily at 00:30 and 12:30 UTC",
     "cot_job": "Friday at 16:00 UTC",
 }
@@ -609,8 +529,6 @@ def run_cron_jobs(now: Optional[datetime] = None) -> list[str]:
         now = now.astimezone(timezone.utc).replace(tzinfo=None)
 
     jobs = {
-        "rate_diff_job": refresh_rate_differentials,
-        "strength_job": refresh_currency_strengths,
         "sentiment_job": refresh_sentiment_cycle,
         "cot_job": refresh_cot_cycle,
     }
@@ -628,8 +546,6 @@ def run_cron_jobs(now: Optional[datetime] = None) -> list[str]:
             due_jobs.append(("auto_alert_job", check_and_alert_upcoming))
 
         slots = {
-            "rate_diff_job": [datetime.combine(now.date(), datetime_time(6, 0))],
-            "strength_job": [datetime.combine(now.date(), datetime_time(7, 0))],
             "sentiment_job": [
                 datetime.combine(now.date(), datetime_time(0, 30)),
                 datetime.combine(now.date(), datetime_time(12, 30)),
@@ -675,11 +591,65 @@ def run_cron_jobs(now: Optional[datetime] = None) -> list[str]:
 # SEED CHECK — run once on startup if models are untrained
 # ══════════════════════════════════════════════════════════════════════════════
 
+def process_and_grade_gold_outcomes(db=None) -> list[str]:
+    """
+    Sweep pending GoldForecast rows where release is >= 35 minutes ago,
+    grade their outcome via fetch_and_record_price_reactions, and trigger
+    incremental learning via train_gold_outcome().
+    """
+    from database import GoldForecast as GoldForecastModel, SessionLocal
+    from gold_model import train_gold_outcome
+    from price_data import fetch_and_record_price_reactions, parse_release_utc
+
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+
+    graded = []
+    try:
+        now_utc = datetime.utcnow()
+        pending = (
+            db.query(GoldForecastModel)
+            .filter(
+                GoldForecastModel.outcome_recorded_at.is_(None),
+                GoldForecastModel.outcome_status == "pending",
+                GoldForecastModel.release_time_utc.isnot(None),
+            )
+            .all()
+        )
+        for gf in pending:
+            rel_dt = parse_release_utc(gf.release_time_utc)
+            if not rel_dt:
+                continue
+            if (now_utc - rel_dt).total_seconds() >= 35 * 60:
+                try:
+                    event_codes = json.loads(gf.event_codes_json or "[]")
+                except Exception:
+                    event_codes = []
+                code = event_codes[0] if event_codes else "USD_RELEASE"
+                fetch_and_record_price_reactions(code, gf.release_time_utc)
+                db.refresh(gf)
+                if gf.outcome_recorded_at is not None:
+                    train_gold_outcome(gf.release_time_utc)
+                    graded.append(gf.release_time_utc)
+    finally:
+        if close_db:
+            db.close()
+    return graded
+
+
 def _rebuild_models_from_history():
     """Rebuild River state from eligible, grouped, point-in-time outcomes."""
     from learning import rebuild_model_from_history
     summary = rebuild_model_from_history()
     log.info("River history rebuild complete: %s", summary)
+    try:
+        from gold_model import rebuild_gold_model_from_history
+        gold_summary = rebuild_gold_model_from_history()
+        log.info("Gold model history rebuild complete: %s", gold_summary)
+    except Exception as ge:
+        log.warning("Gold model rebuild failed: %s", ge)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -699,22 +669,6 @@ def start_scheduler():
         trigger="interval",
         minutes=1,
         id="auto_alert_job",
-    )
-
-    # Daily at 06:00 UTC — rate differentials
-    scheduler.add_job(
-        refresh_rate_differentials,
-        trigger="cron",
-        hour=6, minute=0,
-        id="rate_diff_job",
-    )
-
-    # Daily at 07:00 UTC — full currency strength cycle
-    scheduler.add_job(
-        refresh_currency_strengths,
-        trigger="cron",
-        hour=7, minute=0,
-        id="strength_job",
     )
 
     # Every 12 hours — sentiment (00:00 and 12:00 UTC)
@@ -737,8 +691,8 @@ def start_scheduler():
     scheduler.start()
 
     log.info(
-        "Scheduler started: alert=1min | rate_diff=06:00 UTC | "
-        "strengths=07:00 UTC | sentiment=00:30/12:30 UTC | cot=Fri 16:00 UTC"
+        "Scheduler started: release check=1min | sentiment=00:30/12:30 UTC | "
+        "COT=Fri 16:00 UTC"
     )
 
 

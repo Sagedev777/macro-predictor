@@ -426,6 +426,7 @@ _COT_THRESHOLD = 0.10   # |net_long_pct| > 10% = directional
 # These match the strings used by the cot_reports library
 _COT_CONTRACT_NAMES: dict[str, str] = {
     "USD": "US DOLLAR INDEX - ICE FUTURES U.S.",
+    "XAU": "GOLD - COMMODITY EXCHANGE INC.",
 }
 
 # In-process COT cache: currency → (timestamp, CotResult)
@@ -617,12 +618,12 @@ def _persist_cot(result: CotResult) -> None:
 
 def refresh_all_cot() -> dict[str, CotResult]:
     """
-    Refresh COT positioning for all 8 currencies.
+    Refresh COT positioning for configured currencies and COMEX gold (XAU).
     Called by scheduler.py once per week (Friday after CFTC release).
     """
     from config.events import CURRENCIES
     results: dict[str, CotResult] = {}
-    for ccy in CURRENCIES:
+    for ccy in list(CURRENCIES) + ["XAU"]:
         try:
             results[ccy] = get_cot_positioning(ccy)
         except Exception as e:

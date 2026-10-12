@@ -4,9 +4,7 @@ alerts.py — Telegram alert sender.
 Sends pre-formatted messages to your Telegram chat:
   Pre-release (10 min before):
     - Event name + release time
-    - BEAT/MISS/INLINE lean with confidence bar
-    - Affected majors (from trade_signals in events.py)
-    - Suggested order level
+    - BEAT/MISS/INLINE economic-number lean with confidence bar
     - Per-indicator breakdown
 
   Post-release (immediately on actual posting):
@@ -20,7 +18,6 @@ import os
 import logging
 import requests
 from dotenv import load_dotenv
-from config.events import EVENTS
 
 load_dotenv()
 log = logging.getLogger("alerts")
@@ -46,13 +43,13 @@ def _normalize_direction(direction: str) -> str:
 
 
 def _direction_emoji_label(direction: str) -> tuple[str, str]:
-    """Return (emoji, label) for a lean_direction value."""
+    """Return (emoji, label) for an economic-number forecast."""
     dir_key = _normalize_direction(direction)
     if dir_key == "BULLISH":
-        return "🟢", "BUY"
+        return "🟢", "BEAT"
     if dir_key == "BEARISH":
-        return "🔴", "SELL"
-    return "🟡", "HOLD"
+        return "🔴", "MISS"
+    return "🟡", "INLINE"
 
 
 def _conf_bar(confidence_pct: float) -> str:
@@ -62,26 +59,6 @@ def _conf_bar(confidence_pct: float) -> str:
     return "█" * filled + "░" * (10 - filled)
 
 
-def _format_pair(signal: str) -> str:
-    """
-    Format a trade signal string for display.
-    'BUY USDJPY' → 'BUY USD/JPY'
-    'SELL XAUUSD' → 'SELL XAU/USD'
-    Leaves WAIT/NO BIAS signals untouched.
-    """
-    parts = signal.strip().split(" ", 1)
-    if len(parts) != 2:
-        return signal
-    direction, sym = parts
-    sym = sym.strip()
-    # Insert slash into 6-char forex pairs; handle XAUUSD as XAU/USD
-    if len(sym) == 6:
-        fmtSym = f"{sym[:3]}/{sym[3:]}"
-    else:
-        fmtSym = sym
-    return f"{direction} {fmtSym}"
-
-
 def _format_prediction_message(prediction: dict, release_time: str = None) -> str:
     """Build the pre-release Telegram message from a prediction dict."""
     event_code = prediction["event_code"]
@@ -89,11 +66,8 @@ def _format_prediction_message(prediction: dict, release_time: str = None) -> st
     confidence = prediction["confidence_pct"]
     indicators = prediction.get("indicator_breakdown", [])
 
-    # Normalize BEAT→BULLISH, MISS→BEARISH for config lookups
-    dir_key   = _normalize_direction(direction)
-    event_cfg = EVENTS.get(event_code, {})
-    currency  = event_cfg.get("currency", prediction.get("currency", "USD"))
-    event_name = event_cfg.get("display_name", event_code)
+    currency = prediction.get("currency", "USD")
+    event_name = prediction.get("event_display_name", event_code)
 
     dir_emoji, dir_label = _direction_emoji_label(direction)
     bar = _conf_bar(confidence)
@@ -103,28 +77,6 @@ def _format_prediction_message(prediction: dict, release_time: str = None) -> st
     previous = prediction.get("previous")
     forecast_str = f"{forecast}" if forecast is not None else "n/a"
     previous_str = f"{previous}" if previous is not None else "n/a"
-
-    # Affected majors — sourced exclusively from trade_signals in events.py
-    trade_signals = prediction.get("trade_signals")
-    if not trade_signals:
-        trade_signals = event_cfg.get("trade_signals", {}).get(dir_key, [])
-    if isinstance(trade_signals, str):
-        trade_signals = [s.strip() for s in trade_signals.split(",") if s.strip()]
-
-    major_signals = [s for s in trade_signals if not s.upper().startswith("WAIT")]
-    majors_lines = "\n".join(f"• {_format_pair(s)}" for s in major_signals) if major_signals else "• —"
-
-    # Suggested order — first from order_suggestions if available
-    order_suggestions = prediction.get("order_suggestions") or []
-    if order_suggestions:
-        first = order_suggestions[0]
-        pair       = first.get("pair", "—")
-        order_type = first.get("bias", "—")
-        level      = first.get("suggested_entry")
-        level_str  = f"{level:.5g}" if level is not None else "—"
-        order_line = f"{pair} {order_type} @ {level_str}"
-    else:
-        order_line = "—"
 
     # Release time line
     rel_line = release_time if release_time else "—"
@@ -149,19 +101,14 @@ def _format_prediction_message(prediction: dict, release_time: str = None) -> st
         f"📅 {rel_line} ({currency})",
         f"Forecast: {forecast_str} | Previous: {previous_str}",
         "",
-        f"{event_code} → {dir_emoji} {dir_label} {currency}",
-        f"Confidence {bar} {confidence:.0f}%",
-        "",
-        "🎯 Majors:",
-        majors_lines,
-        "",
-        f"📍 Suggested order: {order_line}",
+        f"Economic-number lean: {dir_emoji} {dir_label} vs consensus",
+        f"Heuristic score {bar} {confidence:.0f}% (not a probability)",
         "",
         "─────────────────────",
         "📋 Indicator details",
         indicator_block,
         "─────────────────────",
-        "⚠️ Probabilistic signal. Apply your own risk management.",
+        "Gold price reaction is modelled separately. This is not a trade instruction.",
     ]
 
     return "\n".join(lines)
@@ -229,7 +176,6 @@ def send_post_release_alert(
     event_code = pred.event_code
     currency   = (pred.currency or "USD").upper()
     ev_name    = event_name or pred.event_display_name or event_code
-    dir_key    = _normalize_direction(pred.lean_direction)
     dir_emoji, dir_label = _direction_emoji_label(pred.lean_direction)
 
     old_confidence = pred.confidence_pct or 0.0
@@ -238,25 +184,16 @@ def send_post_release_alert(
     result_tag = "✅ Confirmed" if was_correct else "❌ Flipped"
     new_bar = _conf_bar(new_confidence)
 
-    # Majors from events config using current lean_direction
-    event_cfg     = EVENTS.get(event_code, {})
-    trade_signals = event_cfg.get("trade_signals", {}).get(dir_key, [])
-    if isinstance(trade_signals, str):
-        trade_signals = [s.strip() for s in trade_signals.split(",") if s.strip()]
-    major_signals = [s for s in trade_signals if not s.upper().startswith("WAIT")]
-    majors_lines  = "\n".join(f"• {_format_pair(s)}" for s in major_signals) if major_signals else "• —"
-
     lines = [
         f"✅ RELEASED — {ev_name}",
         f"Actual: {actual} | Forecast: {forecast} | Surprise: {surprise_sign}{surprise:.2f}",
         "",
-        f"Pre-release call: {dir_emoji} {dir_label} {currency}, {old_confidence:.0f}%",
+        f"Pre-release economic-number lean: {dir_emoji} {dir_label} {currency}, {old_confidence:.0f}%",
         f"Result: {result_tag}",
         "",
         f"Updated confidence {new_bar} {new_confidence:.0f}%",
         "",
-        "🎯 Majors — current read:",
-        majors_lines,
+        "This describes the economic print versus consensus, not the gold-price reaction.",
         "",
         f"📊 Model: {currency} now trained on {n_trained_after} real outcomes (was {n_trained_before})",
         f"This month: {wins_this_month}W – {losses_this_month}L",

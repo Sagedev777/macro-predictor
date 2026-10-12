@@ -50,8 +50,6 @@ class CronIntegrityTests(unittest.TestCase):
     def test_periodic_jobs_run_once_and_persist_last_run(self):
         run_at = datetime(2026, 10, 2, 17, 0)  # Friday, after all UTC slots
         job_names = (
-            "rate_diff_job",
-            "strength_job",
             "sentiment_job",
             "cot_job",
             "auto_alert_job",
@@ -60,8 +58,6 @@ class CronIntegrityTests(unittest.TestCase):
             unittest.mock.patch.object(scheduler, name)
             for name in (
                 "check_and_alert_upcoming",
-                "refresh_rate_differentials",
-                "refresh_currency_strengths",
                 "refresh_sentiment_cycle",
                 "refresh_cot_cycle",
             )
