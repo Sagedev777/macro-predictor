@@ -2,11 +2,10 @@
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.9
 - Node.js 20+ / npm
 - cPanel hosting with Passenger WSGI support (current setup: titanfxsage.omubedhe.com)
-- ~2 GB free disk space (FinBERT model weights: ~440 MB)
-- ~1.5 GB free RAM (FinBERT CPU inference)
+- Enough disk/RAM for the application and its data
 
 ---
 
@@ -34,14 +33,15 @@ source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**First-run note on torch:** `torch` is a large package (~800 MB wheel). If disk space is tight, install the CPU-only wheel explicitly:
+Sentiment retains GDELT/RSS article collection and uses a deterministic local
+positive/negative word-list scorer. It does not download or load a model.
+RSS and Atom feeds are parsed with the Python standard library.
 
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
-```
-
-**First-run note on FinBERT:** The `ProsusAI/finbert` model weights (~440 MB) download automatically from HuggingFace on the first call to `sentiment.py`. This happens once and is cached in `~/.cache/huggingface/`. Subsequent starts use the local cache.
+`requirements.txt` pins the Python 3.9 dependency closure. The pinned
+`cot_reports==0.1.3` release is the one exception to wheel-backed artifacts:
+PyPI declares no `Requires-Python` and publishes only a source distribution.
+Its source parses with Python 3.9 grammar, but a live install/run on Python 3.9
+could not be verified on this machine because that interpreter is unavailable.
 
 ---
 
@@ -61,6 +61,11 @@ The built assets land in `frontend/dist/`. The FastAPI app serves them from `dis
 ### 4. Initialise the database
 
 The database auto-migrates on startup. No manual migration step is needed. The existing `macro_predictor.db` historical ledger is preserved — new tables and columns are added non-destructively via `init_db()`.
+
+To create a separate empty schema database, run
+`python fresh_db.py --output /path/to/new.db`. Use `python preview_alerts.py`
+to print sample Telegram text without sending; `python send_test_telegram.py`
+sends one explicit connectivity test message.
 
 ---
 
@@ -89,6 +94,22 @@ from api import app as application
 
 Restart the app from cPanel after deploying to pick up the new code.
 
+#### Cron-driven scheduler
+
+Set `ENABLE_BACKGROUND_SCHEDULER=false` in the web application's environment so
+Passenger does not also start an in-process scheduler. Add this cPanel cron job
+to run one cycle every minute (replace `CPANEL_USERNAME` with the cPanel
+account name):
+
+```cron
+* * * * * /home/CPANEL_USERNAME/virtualenv/macro-predictor/3.9/bin/python /home/CPANEL_USERNAME/macro-predictor/run_tick.py >> /home/CPANEL_USERNAME/macro-predictor/run_tick.log 2>&1
+```
+
+`run_tick.py` resolves project paths from its own location, takes a non-blocking
+lock to skip overlapping runs, executes the one-minute event cycle and every
+periodic job due according to its UTC schedule, records each job's last run in
+the database, and exits.
+
 ---
 
 ## First-Run Sequence
@@ -97,9 +118,9 @@ On the very first startup after deployment:
 
 1. `init_db()` creates all new tables and migrates existing columns.
 2. `_maybe_seed_models()` seeds the 8 River ARF models with COT + rate-differential priors (10 synthetic samples each). This requires the DB to have at least one rate-differential and COT snapshot. If those haven't run yet, the models start from equal-weight priors and the first real `learn_one()` calls begin building genuine signal.
-3. The scheduler fires its first `check_and_alert_upcoming()` within 5 minutes.
+3. The configured scheduler runs `check_and_alert_upcoming()` every minute.
 4. Rate differentials and currency strengths are computed on the first 06:00/07:00 UTC cron fire (or manually via `POST /api/run-full-cycle`).
-5. FinBERT downloads weights on the first 00:30 UTC sentiment cron (or manually via `POST /api/run-full-cycle`). Expect ~5–10 minutes for the download on a typical VPS.
+5. Sentiment refresh collects GDELT/RSS articles and applies the local lexicon scorer.
 
 To bootstrap everything immediately without waiting for cron:
 
@@ -163,10 +184,9 @@ Runs: rate differentials → currency strengths (all 8) → persists to DB. Take
 |---|---|---|
 | `FRED_API_KEY not set` in logs | `.env` not loaded | Check `.env` exists in project root, not in `frontend/` |
 | Order levels all null | `TWELVE_DATA_API_KEY` missing or invalid | Set key in `.env`, restart |
-| FinBERT never loads | Disk full or no internet on first run | Free disk space; ensure outbound HTTPS on server |
 | COT data empty | `cot_reports` couldn't download CFTC file | Check server has outbound HTTPS; CFTC publishes Fridays |
 | `No module named 'river'` | venv not activated or pip install failed | Re-run `pip install -r requirements.txt` in venv |
-| Sentiment all neutral | FinBERT not loaded (check logs for load error) | See FinBERT note above; check disk/RAM |
+| Sentiment all neutral | No lexicon terms in recent articles | Check feed collection and article text |
 | Calendar shows only USD | Old `calendar_cache.json` from v2 still cached | Delete `calendar_cache.json`, force refresh via `/api/events?force_refresh=true` |
 
 ---

@@ -2,20 +2,18 @@
 learning.py — Online/continuous learning engine using River's Adaptive Random Forest.
 
 Architecture:
-  - One ARFClassifier per currency (8 models total: USD, EUR, GBP, JPY, AUD, CHF, CAD, NZD)
+  - One ARFClassifier for USD (the only tracked currency)
   - Each model takes 4 feature signals as input:
         indicator_score   float [-1, +1]  — z-score aggregate from indicators.py
         rate_diff_score   float [-1, +1]  — yield spread from data_sources.py
         cot_score         float [-1, +1]  — COT net-long from sentiment.py
-        sentiment_score   float [-1, +1]  — FinBERT net from sentiment.py
+        sentiment_score   float [-1, +1]  — local sentiment score from sentiment.py
   - Output: predicted class (1=bullish, 0=bearish) + probability → strength score
   - ARF has native concept-drift detection (ADWIN per tree) — no manual decay needed
 
-Seeding strategy (day-one, before any real learn_one() calls):
-  - Feed synthetic "warm-up" observations built from current COT + rate differential
-    so the model starts with "what the market already believes" as its prior
-  - 10 synthetic samples per currency — low weight but enough to give ARF a
-    directional starting point rather than a coin-flip
+Seeding strategy:
+  - Synthetic seeding disabled — n_trained starts at 0 and increments only from
+    real pre-release graded USD predictions via learn_one().
 
 Persistence:
   - Model state serialised via pickle and stored in river_model_state table
@@ -26,23 +24,26 @@ Feature importance drift:
   - We track drift by logging the rolling correlation of each feature with
     correct predictions over the last N outcomes (sliding window)
   - Stored as JSON in river_model_state.feature_weights for dashboard display
+  - Labelled "estimated" because it is Pearson-correlation-based, not native RF
+    feature importance; and shown only when n >= 5 real outcomes exist.
 
 Public interface:
-  get_model(currency)                         → ARFClassifier (loads from DB or creates fresh)
-  predict_strength(currency, features)        → StrengthPrediction
-  learn_one(currency, features, outcome)      → updated model stats
-  seed_models_with_priors()                   → seed all 8 models on first run
-  get_all_strengths(feature_dict)             → dict[currency, StrengthPrediction]
-  compute_pair_bias(base, quote, features)    → PairBias
-  get_feature_importance_drift()              → dict[currency, dict]
+  get_model(currency)                         -> ARFClassifier (loads from DB or creates fresh)
+  predict_strength(currency, features)        -> StrengthPrediction
+  learn_one(currency, features, outcome)      -> updated model stats
+  seed_models_with_priors()                   -> no-op (seeding disabled)
+  get_all_strengths(feature_dict)             -> dict[currency, StrengthPrediction]
+  compute_pair_bias(base, quote, features)    -> PairBias
+  get_feature_importance_drift()              -> dict[str, dict]
 """
 
 import json
 import logging
 import pickle
+import threading
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 log = logging.getLogger("learning")
@@ -187,6 +188,14 @@ class _ModelRegistry:
 
 
 _registry = _ModelRegistry()
+_release_training_lock = threading.Lock()
+_trained_release_moments: set[str] = set()
+_last_rebuild_summary: dict = {
+    "n_trained": 0,
+    "release_moments_used": [],
+    "excluded_predictions_without_snapshot": 0,
+    "missing_snapshot_prediction_ids": [],
+}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -209,6 +218,322 @@ def build_features(
         "cot_score":        float(cot_score),
         "sentiment_score":  float(sentiment_score),
     }
+
+
+def capture_prediction_features(currency: str, indicator_score: float) -> dict:
+    """Capture the exact feature values available when a prediction is created."""
+    from data_sources import get_rate_differential, rate_diff_to_score
+    from sentiment import (
+        get_latest_cot,
+        get_latest_sentiment,
+        cot_to_score,
+        sentiment_to_score,
+    )
+
+    rate_diff = get_rate_differential(currency)
+    cot = get_latest_cot(currency)
+    sentiment = get_latest_sentiment(currency)
+    return build_features(
+        indicator_score=indicator_score,
+        rate_diff_score=rate_diff_to_score(rate_diff),
+        cot_score=cot_to_score(cot),
+        sentiment_score=sentiment_to_score(sentiment),
+    )
+
+
+def save_prediction_feature_snapshot(db, prediction, features: dict) -> None:
+    """Persist prediction-time River inputs in indicator_snapshots."""
+    from database import IndicatorSnapshot
+
+    db.add(IndicatorSnapshot(
+        pulled_at=prediction.created_at or datetime.utcnow(),
+        fred_series="PREDICTION_INPUTS",
+        prediction_id=prediction.id,
+        indicator_score=float(features["indicator_score"]),
+        rate_diff_score=float(features["rate_diff_score"]),
+        cot_score=float(features["cot_score"]),
+        sentiment_score=float(features["sentiment_score"]),
+    ))
+
+
+def _group_price_graded_predictions():
+    """Build one price-graded observation per eligible release time."""
+    from database import IndicatorSnapshot, Prediction, SessionLocal, is_pre_release_prediction
+
+    db = SessionLocal()
+    try:
+        candidates = (
+            db.query(Prediction)
+            .filter(
+                (Prediction.currency == "USD") | Prediction.currency.is_(None),
+                Prediction.is_sample.is_(False),
+                Prediction.price_graded_at.isnot(None),
+                Prediction.result_15m.in_(("CORRECT", "INCORRECT")),
+                Prediction.usd_move_15m.in_(("UP", "DOWN")),
+                Prediction.lean_direction.in_(("BEAT", "MISS")),
+            )
+            .order_by(Prediction.created_at.asc(), Prediction.id.asc())
+            .all()
+        )
+        candidates = [p for p in candidates if is_pre_release_prediction(p)]
+        prediction_ids = [p.id for p in candidates]
+        snapshots = {}
+        if prediction_ids:
+            snapshots = {
+                s.prediction_id: s
+                for s in db.query(IndicatorSnapshot)
+                .filter(IndicatorSnapshot.prediction_id.in_(prediction_ids))
+                .all()
+            }
+
+        by_release: dict[str, list] = {}
+        for prediction in candidates:
+            by_release.setdefault(prediction.release_time_utc, []).append(prediction)
+
+        moments = []
+        missing_snapshot_ids = []
+        for release_time, predictions in sorted(by_release.items()):
+            moves = {p.usd_move_15m.upper() for p in predictions}
+            if len(moves) != 1:
+                log.warning(
+                    "Excluding release moment %s: conflicting price-graded moves %s",
+                    release_time, sorted(moves),
+                )
+                continue
+
+            stored_features = []
+            usable_predictions = []
+            for prediction in predictions:
+                snapshot = snapshots.get(prediction.id)
+                if snapshot is None:
+                    missing_snapshot_ids.append(prediction.id)
+                    continue
+                values = (
+                    snapshot.indicator_score,
+                    snapshot.rate_diff_score,
+                    snapshot.cot_score,
+                    snapshot.sentiment_score,
+                )
+                if any(value is None for value in values):
+                    missing_snapshot_ids.append(prediction.id)
+                    continue
+                stored_features.append(build_features(*values))
+                usable_predictions.append(prediction)
+
+            group_features = None
+            if stored_features:
+                group_features = {
+                    name: sum(features[name] for features in stored_features) / len(stored_features)
+                    for name in FEATURE_NAMES
+                }
+            hits = sum(1 for p in predictions if p.result_15m == "CORRECT")
+            misses = sum(1 for p in predictions if p.result_15m == "INCORRECT")
+            moments.append({
+                "release_time_utc": release_time,
+                "features": group_features,
+                "outcome": 1 if next(iter(moves)) == "UP" else 0,
+                "hit": hits > misses if hits != misses else None,
+                "predictions": predictions,
+                "usable_predictions": usable_predictions,
+                "confidence_pct": (
+                    sum(float(p.confidence_pct or 0.0) for p in predictions) / len(predictions)
+                ),
+                "event_codes": sorted({p.event_code for p in predictions}),
+            })
+
+        return moments, missing_snapshot_ids
+    finally:
+        db.close()
+
+
+def get_grouped_release_moments() -> list[dict]:
+    """Return one price-graded record per release moment for accuracy views."""
+    moments, _ = _group_price_graded_predictions()
+    return moments
+
+
+def get_last_rebuild_summary() -> dict:
+    """Return the most recent startup rebuild counts and release timestamps."""
+    return dict(_last_rebuild_summary)
+
+
+def rebuild_model_from_history() -> dict:
+    """Discard the saved USD model and replay only grouped, snapshotted outcomes."""
+    global _last_rebuild_summary
+
+    moments, missing_snapshot_ids = _group_price_graded_predictions()
+    from database import (
+        ReleaseMomentTraining,
+        SessionLocal,
+        upsert_river_model,
+    )
+
+    with _release_training_lock:
+        model = _registry._make_fresh_model()
+        _registry._models["USD"] = model
+        _registry._n_trained["USD"] = 0
+        _registry._accuracy["USD"] = _registry._make_fresh_accuracy()
+        _registry._history["USD"] = deque(maxlen=_DRIFT_WINDOW)
+        _registry._stored_weights.pop("USD", None)
+        _registry._loaded.add("USD")
+        _trained_release_moments.clear()
+
+        for moment in moments:
+            if moment["features"] is not None:
+                stats = learn_one("USD", moment["features"], moment["outcome"])
+                if not stats:
+                    raise RuntimeError(
+                        f"Failed rebuilding River model for {moment['release_time_utc']}"
+                    )
+                _trained_release_moments.add(moment["release_time_utc"])
+
+        trained_moments = [moment for moment in moments if moment["features"] is not None]
+        if not trained_moments:
+            upsert_river_model(
+                "USD",
+                model,
+                0,
+                None,
+                json.dumps({name: 0.25 for name in FEATURE_NAMES}),
+            )
+        marker_db = SessionLocal()
+        try:
+            marker_db.query(ReleaseMomentTraining).filter_by(currency="USD").delete()
+            for moment in trained_moments:
+                marker_db.add(ReleaseMomentTraining(
+                    release_time_utc=moment["release_time_utc"],
+                    currency="USD",
+                    claimed_at=datetime.utcnow(),
+                    trained_at=datetime.utcnow(),
+                    n_predictions=len(moment["usable_predictions"]),
+                ))
+            marker_db.commit()
+        except Exception:
+            marker_db.rollback()
+            raise
+        finally:
+            marker_db.close()
+
+        _last_rebuild_summary = {
+            "n_trained": _registry.get_n_trained("USD"),
+            "release_moments_used": [
+                moment["release_time_utc"] for moment in trained_moments
+            ],
+            "excluded_predictions_without_snapshot": len(missing_snapshot_ids),
+            "missing_snapshot_prediction_ids": sorted(set(missing_snapshot_ids)),
+        }
+        log.info(
+            "Rebuilt USD River model: n_trained=%d release_moments_used=%s "
+            "excluded_without_snapshot=%d prediction_ids=%s",
+            _last_rebuild_summary["n_trained"],
+            _last_rebuild_summary["release_moments_used"],
+            _last_rebuild_summary["excluded_predictions_without_snapshot"],
+            _last_rebuild_summary["missing_snapshot_prediction_ids"],
+        )
+        return dict(_last_rebuild_summary)
+
+
+def train_release_moment(release_time_utc: str) -> dict:
+    """Train at most once on the fully price-graded predictions for a release."""
+    from database import (
+        Prediction,
+        ReleaseMomentTraining,
+        SessionLocal,
+        is_pre_release_prediction,
+    )
+
+    with _release_training_lock:
+        db = SessionLocal()
+        try:
+            marker = db.get(ReleaseMomentTraining, (release_time_utc, "USD"))
+            if marker and marker.trained_at is not None:
+                _trained_release_moments.add(release_time_utc)
+                return {}
+            if marker and marker.claimed_at > datetime.utcnow() - timedelta(minutes=10):
+                return {}
+
+            predictions = (
+                db.query(Prediction)
+                .filter(
+                    Prediction.release_time_utc == release_time_utc,
+                    (Prediction.currency == "USD") | Prediction.currency.is_(None),
+                    Prediction.is_sample.is_(False),
+                )
+                .all()
+            )
+            eligible = [p for p in predictions if is_pre_release_prediction(p)]
+            if not eligible or any(p.price_graded_at is None for p in eligible):
+                return {}
+            if marker is None:
+                marker = ReleaseMomentTraining(
+                    release_time_utc=release_time_utc,
+                    currency="USD",
+                    claimed_at=datetime.utcnow(),
+                    n_predictions=len(eligible),
+                )
+                db.add(marker)
+            else:
+                marker.claimed_at = datetime.utcnow()
+                marker.n_predictions = len(eligible)
+            db.commit()
+        finally:
+            db.close()
+
+        moments, missing_snapshot_ids = _group_price_graded_predictions()
+        moment = next(
+            (item for item in moments if item["release_time_utc"] == release_time_utc),
+            None,
+        )
+        if moment is None:
+            if missing_snapshot_ids:
+                log.warning(
+                    "Excluded release moment %s from River training; no complete "
+                    "stored feature snapshot (missing prediction ids=%s)",
+                    release_time_utc, missing_snapshot_ids,
+                )
+            return {}
+
+        if moment["features"] is None:
+            log.warning(
+                "Excluded release moment %s from River training; no stored feature snapshot",
+                release_time_utc,
+            )
+            return {}
+        try:
+            stats = learn_one("USD", moment["features"], moment["outcome"])
+            if not stats:
+                raise RuntimeError("River learn_one did not return training statistics")
+            marker_db = SessionLocal()
+            try:
+                marker = marker_db.get(
+                    ReleaseMomentTraining, (release_time_utc, "USD")
+                )
+                if marker is None:
+                    raise RuntimeError(
+                        f"Training claim disappeared for {release_time_utc}"
+                    )
+                marker.trained_at = datetime.utcnow()
+                marker_db.commit()
+            finally:
+                marker_db.close()
+        except Exception:
+            rollback_db = SessionLocal()
+            try:
+                marker = rollback_db.get(
+                    ReleaseMomentTraining, (release_time_utc, "USD")
+                )
+                if marker and marker.trained_at is None:
+                    rollback_db.delete(marker)
+                    rollback_db.commit()
+            finally:
+                rollback_db.close()
+            raise
+        _trained_release_moments.add(release_time_utc)
+        log.info(
+            "Trained USD River model once for release_time_utc=%s n_trained=%d",
+            release_time_utc, stats["n_trained"],
+        )
+        return stats
 
 
 def _features_to_class(features: dict) -> int:
@@ -394,7 +719,14 @@ SHORT_FEATURE_NAMES = {
 
 
 def format_weight_shift(fw_before: dict, fw_after: dict, n_history: int) -> str:
-    """Format the change in feature weights from an update."""
+    """
+    Format the estimated change in feature weights from an update.
+    Returns 'not enough data' text until n_history >= 5 real outcomes.
+    All figures are labelled 'estimated' because they derive from Pearson
+    correlation over a sliding window, not native RF feature importance.
+    """
+    if n_history < 5:
+        return f"Not enough data — estimated weights shown after 5 real outcomes ({n_history}/5 so far)"
     deltas = []
     for k in FEATURE_NAMES:
         before = fw_before.get(k, 0.25)
@@ -405,10 +737,8 @@ def format_weight_shift(fw_before: dict, fw_after: dict, n_history: int) -> str:
             sign = "+" if diff > 0 else ""
             deltas.append(f"{short} {sign}{diff * 100:.1f}%")
     if deltas:
-        return ", ".join(deltas)
-    if n_history < 5:
-        return f"Equal priors retained (n={n_history}/5) · Dynamic drift active at n=5"
-    return "No significant weight shift (<0.1%)"
+        return "Estimated: " + ", ".join(deltas)
+    return "Estimated: No significant weight shift (<0.1%)"
 
 
 def _compute_feature_weights(currency: str) -> dict:
@@ -461,32 +791,28 @@ def _compute_feature_weights(currency: str) -> dict:
 
 def get_feature_importance_drift() -> dict[str, dict]:
     """
-    Return feature importance weights for all 8 currencies from the DB.
-    Used by the dashboard to show which signal type is currently most predictive.
+    Return feature importance weights for USD from the DB.
+    USD-only: only one row exists in river_model_state.
 
     Returns:
       {
         "USD": {"indicator_score": 0.42, "rate_diff_score": 0.28, ...},
-        "EUR": {...},
-        ...
       }
     """
-    from config.events import CURRENCIES
     from database import SessionLocal, RiverModelState
 
     result: dict[str, dict] = {}
     db = SessionLocal()
     try:
-        for ccy in CURRENCIES:
-            row = db.query(RiverModelState).filter_by(currency=ccy).first()
-            if row and row.feature_weights:
-                try:
-                    result[ccy] = json.loads(row.feature_weights)
-                    continue
-                except Exception:
-                    pass
-            equal = round(1.0 / len(FEATURE_NAMES), 4)
-            result[ccy] = {k: equal for k in FEATURE_NAMES}
+        row = db.query(RiverModelState).filter_by(currency="USD").first()
+        if row and row.feature_weights:
+            try:
+                result["USD"] = json.loads(row.feature_weights)
+                return result
+            except Exception:
+                pass
+        equal = round(1.0 / len(FEATURE_NAMES), 4)
+        result["USD"] = {k: equal for k in FEATURE_NAMES}
     finally:
         db.close()
     return result

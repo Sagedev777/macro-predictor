@@ -6,15 +6,12 @@ Sources:
      Free, no key, no rate-limit tier.  Used via gdeltdoc library.
 
   2. RSS feeds          — ForexLive, FXStreet, central bank speech pages.
-     Parsed with feedparser.  Feed URLs defined in config/events.py RSS_FEEDS.
+     Parsed with the Python standard library. Feed URLs live in RSS_FEEDS.
 
   3. Central bank speech text — Fed, ECB, BoE, etc.
      Full text pulled from official RSS <description> / <content> fields.
 
-  4. FinBERT            — ProsusAI/finbert (Hugging Face open-weight model).
-     Loaded once at module import; runs locally, zero per-call cost.
-     First import downloads ~440 MB of model weights to the HF cache directory.
-     Inference is CPU-only; no GPU required.
+  4. Local lexicon scorer — deterministic word-list scoring with no model download.
 
   5. CFTC COT reports   — via `cot_reports` library.
      Auto-downloads official CFTC weekly data; no manual file parsing.
@@ -31,49 +28,18 @@ Public interface:
 """
 
 import logging
+import html
+import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional
 
+import requests
+
 log = logging.getLogger("sentiment")
-
-# ── FinBERT lazy-load (heavy import; only pulled once) ────────────────────────
-_finbert_pipeline = None
-_finbert_load_attempted = False
-
-
-def _get_finbert():
-    """
-    Lazy-load ProsusAI/finbert pipeline.
-    Downloads ~440 MB on first run; cached locally by HuggingFace thereafter.
-    Returns None if transformers/torch are not installed.
-    """
-    global _finbert_pipeline, _finbert_load_attempted
-    if _finbert_load_attempted:
-        return _finbert_pipeline
-    _finbert_load_attempted = True
-    try:
-        from transformers import pipeline
-        log.info("Loading ProsusAI/finbert — may download weights on first run...")
-        _finbert_pipeline = pipeline(
-            task="text-classification",
-            model="ProsusAI/finbert",
-            tokenizer="ProsusAI/finbert",
-            device=-1,           # -1 = CPU; change to 0 for GPU
-            top_k=None,          # return all three labels
-            truncation=True,
-            max_length=512,
-        )
-        log.info("FinBERT loaded successfully.")
-    except ImportError:
-        log.warning("transformers/torch not installed — sentiment scoring disabled.")
-        _finbert_pipeline = None
-    except Exception as e:
-        log.error("FinBERT load failed: %s", e)
-        _finbert_pipeline = None
-    return _finbert_pipeline
-
 
 # ── Result dataclasses ────────────────────────────────────────────────────────
 
@@ -148,7 +114,7 @@ def _fetch_gdelt_articles(currency: str, hours: int = 48) -> list[str]:
         for _, row in articles_df.iterrows():
             title   = str(row.get("title",   "") or "")
             seendoc = str(row.get("seendate","") or "")
-            # Use title + socialimage alt-text if available; they're short enough for FinBERT
+            # Titles are short inputs for the local term scorer.
             text = title.strip()
             if text:
                 snippets.append(text)
@@ -162,15 +128,9 @@ def _fetch_gdelt_articles(currency: str, hours: int = 48) -> list[str]:
 def _fetch_rss_articles(currency: str, hours: int = 48) -> list[str]:
     """
     Pull and filter RSS feed entries for a currency.
-    Uses feedparser; feed URLs from config/events.py RSS_FEEDS.
+    Parses RSS and Atom XML with the Python standard library.
     Returns a list of text snippets (title + summary).
     """
-    try:
-        import feedparser
-    except ImportError:
-        log.warning("feedparser not installed — RSS articles skipped.")
-        return []
-
     from config.events import RSS_FEEDS
     feeds = RSS_FEEDS.get(currency.upper(), [])
     keywords = [kw.lower() for kw in _CURRENCY_KEYWORDS.get(currency.upper(), [])]
@@ -179,27 +139,54 @@ def _fetch_rss_articles(currency: str, hours: int = 48) -> list[str]:
     snippets: list[str] = []
     for feed_url in feeds:
         try:
-            parsed = feedparser.parse(feed_url)
-            for entry in parsed.entries:
-                # Attempt to parse published date
+            response = requests.get(feed_url, timeout=15)
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+            for entry in root.iter():
+                if entry.tag.rsplit("}", 1)[-1].lower() not in ("item", "entry"):
+                    continue
+
+                fields = {
+                    child.tag.rsplit("}", 1)[-1].lower(): "".join(child.itertext())
+                    for child in entry
+                }
+                published_text = (
+                    fields.get("published")
+                    or fields.get("pubdate")
+                    or fields.get("updated")
+                    or fields.get("date")
+                )
                 published = None
-                if hasattr(entry, "published_parsed") and entry.published_parsed:
+                if published_text:
                     try:
-                        published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-                    except Exception:
-                        pass
+                        published = parsedate_to_datetime(published_text)
+                    except (TypeError, ValueError, OverflowError):
+                        try:
+                            published = datetime.fromisoformat(
+                                published_text.replace("Z", "+00:00")
+                            )
+                        except ValueError:
+                            published = None
+                    if published is not None and published.tzinfo is None:
+                        published = published.replace(tzinfo=timezone.utc)
                 if published and published < cutoff:
                     continue   # too old
 
-                title   = getattr(entry, "title",   "") or ""
-                summary = getattr(entry, "summary", "") or ""
+                title = html.unescape(fields.get("title", "") or "")
+                summary = html.unescape(
+                    fields.get("summary")
+                    or fields.get("description")
+                    or fields.get("content")
+                    or ""
+                )
+                summary = re.sub(r"<[^>]+>", " ", summary)
                 text    = f"{title} {summary}".strip().lower()
 
                 # Filter: must mention at least one currency keyword
                 if any(kw in text for kw in keywords):
                     snippet = f"{title} {summary}".strip()
                     if snippet:
-                        snippets.append(snippet[:600])  # cap length for FinBERT
+                        snippets.append(snippet[:600])
 
         except Exception as e:
             log.warning("RSS fetch failed [%s] for %s: %s", feed_url, currency, e)
@@ -210,7 +197,7 @@ def _fetch_rss_articles(currency: str, hours: int = 48) -> list[str]:
 def fetch_consensus_articles(currency: str, hours: int = 48) -> list[str]:
     """
     Aggregate article text from all sources (GDELT + RSS feeds) for a currency.
-    Returns a deduplicated list of text snippets for FinBERT scoring.
+    Returns a deduplicated list of text snippets for local lexicon scoring.
     """
     gdelt_articles = _fetch_gdelt_articles(currency, hours)
     rss_articles   = _fetch_rss_articles(currency, hours)
@@ -232,15 +219,24 @@ def fetch_consensus_articles(currency: str, hours: int = 48) -> list[str]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FINBERT SCORING
+# LOCAL LEXICON SENTIMENT
 # ══════════════════════════════════════════════════════════════════════════════
 
-_FINBERT_BATCH_SIZE = 32   # process this many texts at once
+_POSITIVE_TERMS = {
+    "accelerate", "beat", "benefit", "bullish", "ease", "expand", "gain",
+    "growth", "improve", "increase", "optimistic", "positive", "rise",
+    "strong", "surge", "upgrade",
+}
+_NEGATIVE_TERMS = {
+    "bearish", "contract", "decline", "decrease", "downturn", "fall",
+    "negative", "pressure", "recession", "risk", "slow", "slump", "weak",
+    "worsen",
+}
 
 
 def score_sentiment(texts: list[str]) -> dict:
     """
-    Run ProsusAI/finbert on a list of text snippets.
+    Score each text by counting local positive and negative finance terms.
 
     Returns:
       {
@@ -251,8 +247,8 @@ def score_sentiment(texts: list[str]) -> dict:
         "scored_count": int,
       }
 
-    Falls back to neutral (0.5/0.0/0.5, net=0) if FinBERT is unavailable
-    or no texts are supplied.
+    Texts without lexicon hits are neutral. This intentionally lightweight
+    heuristic is not a contextual financial-language model.
     """
     neutral_result = {
         "bullish_pct":  0.0,
@@ -262,34 +258,17 @@ def score_sentiment(texts: list[str]) -> dict:
         "scored_count": 0,
     }
 
-    if not texts:
-        return neutral_result
-
-    pipe = _get_finbert()
-    if pipe is None:
-        log.warning("FinBERT unavailable — returning neutral sentiment.")
-        return neutral_result
-
     label_counts: dict[str, int] = {"positive": 0, "negative": 0, "neutral": 0}
-
-    try:
-        # Process in batches
-        for i in range(0, len(texts), _FINBERT_BATCH_SIZE):
-            batch = texts[i : i + _FINBERT_BATCH_SIZE]
-            results = pipe(batch)  # list of list[dict] when top_k=None
-
-            for per_text in results:
-                if not per_text:
-                    continue
-                # Pick the label with highest score
-                best = max(per_text, key=lambda x: x["score"])
-                label = best["label"].lower()
-                if label in label_counts:
-                    label_counts[label] += 1
-
-    except Exception as e:
-        log.error("FinBERT inference failed: %s", e)
-        return neutral_result
+    for text in texts:
+        words = set(re.findall(r"[a-z]+", text.lower()))
+        positive = len(words & _POSITIVE_TERMS)
+        negative = len(words & _NEGATIVE_TERMS)
+        label = (
+            "positive" if positive > negative else
+            "negative" if negative > positive else
+            "neutral"
+        )
+        label_counts[label] += 1
 
     total = sum(label_counts.values())
     if total == 0:
@@ -314,7 +293,7 @@ def score_sentiment(texts: list[str]) -> dict:
 
 def get_currency_sentiment(currency: str, hours: int = 48) -> SentimentResult:
     """
-    Fetch articles, score with FinBERT, persist to DB, and return SentimentResult.
+    Fetch articles, score with the local word list, persist and return the result.
     """
     from database import SentimentSnapshot, SessionLocal
     import json
@@ -402,7 +381,7 @@ def refresh_all_sentiment(hours: int = 48) -> dict[str, SentimentResult]:
 def get_latest_sentiment(currency: str) -> Optional[SentimentResult]:
     """
     Return the most recent SentimentResult for a currency from the DB
-    (without re-running FinBERT).  Returns None if no data exists.
+    (without fetching articles again). Returns None if no data exists.
     """
     from database import SentimentSnapshot, SessionLocal
     import json

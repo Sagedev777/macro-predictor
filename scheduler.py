@@ -6,40 +6,71 @@ scheduler.py — Background scheduler for pre-release alerts, post-release gradi
 Schedule summary:
   Every 1 min   — check_and_alert_upcoming()   (pre-release + post-release grading)
   Every 24 hr   — refresh_rate_differentials()  (USD yield spread)
-  Every 12 hr   — refresh_sentiment_cycle()     (GDELT + RSS + FinBERT for USD)
+  Every 12 hr   — refresh_sentiment_cycle()     (GDELT + RSS lexicon sentiment)
   Every 168 hr  — refresh_cot_cycle()           (CFTC COT, released Fridays)
   Every 24 hr   — refresh_currency_strengths()  (full feature vector + River predict)
 
-River learn_one() is called inline inside check_and_alert_upcoming() immediately
-after a prediction is graded — not on a separate schedule.
+River learn_one() is called once after every prediction at a release moment has
+been price-graded — not once per event code.
 """
 
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Optional
 
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
-from alerts import BOT_TOKEN, CHAT_ID, send_telegram_alert, send_post_release_alert
+from alerts import BOT_TOKEN, CHAT_ID, send_telegram_alert
 from calendar_feed import fetch_upcoming_red_folder_events
 from config.events import CURRENCIES, get_event_config
 from database import (
     AlertLog,
+    PeriodicJobRun,
     Prediction as PredictionModel,
     SessionLocal,
     check_is_late,
     is_pre_release_prediction,
 )
 from indicators import build_composite_score
+from price_data import parse_release_utc, process_and_grade_event_price_reactions
 
 load_dotenv()
 log = logging.getLogger("scheduler")
 
 scheduler: Optional[BackgroundScheduler] = None
+
+
+def is_numeric_event(ev: dict) -> bool:
+    """
+    Check if an event is a numeric economic data release.
+    Events without numeric forecast and actual (FOMC minutes, speeches, statements)
+    must not have predictions created.
+    """
+    code = (ev.get("event_code") or "").upper()
+    name = (ev.get("event_name") or "").lower()
+
+    # Exclude speeches, statements, minutes, hearings
+    non_numeric_terms = ["speaks", "speech", "minute", "statement", "testimony", "press conference"]
+    if any(t in name for t in non_numeric_terms):
+        return False
+    if any(t in code.lower() for t in ["speaks", "speech", "minute", "statement"]):
+        return False
+
+    forecast = ev.get("forecast")
+    actual   = ev.get("actual")
+    if forecast is None and actual is None:
+        from config.events import EVENTS
+        cfg = EVENTS.get(code)
+        if not cfg or not cfg.get("history_series"):
+            return False
+        if code in ("FOMC_MINUTES", "FOMC_MEETING_MINUTES"):
+            return False
+
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -113,42 +144,90 @@ def grade_prediction(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TELEGRAM ALERTS — unchanged from original
+# TELEGRAM RELEASE ALERTS
 # ══════════════════════════════════════════════════════════════════════════════
+def _send_release_alert_once(db, event_code: str, release_time: str,
+                             alert_type: str, message: str) -> bool:
+    """Reserve an alert key before sending so concurrent processes cannot duplicate it."""
+    from sqlalchemy.exc import IntegrityError
 
-def send_outcome_alert(
-    event_code:          str,
-    actual:              float,
-    forecast:            float,
-    was_correct:         bool,
-    lean_direction:      str,
-    verdict_explanation: str = "",
-):
-    """Send outcome grading alert to Telegram after release."""
     if not BOT_TOKEN or not CHAT_ID:
-        return
-
-    verdict_tag  = "🎯 PREDICTION WON (CORRECT)" if was_correct else "❌ PREDICTION MISSED (INCORRECT)"
-    status_color = "🟢" if was_correct else "🔴"
-    diff         = actual - forecast
-    diff_sign    = "+" if diff > 0 else ""
-
-    text = (
-        f"{status_color} *REAL OUTCOME REPORT — {event_code}*\n\n"
-        f"Result: *{verdict_tag}*\n"
-        f"─────────────────────\n"
-        f"Pre-Release Lean: `{lean_direction}`\n"
-        f"Actual: `{actual}` | Forecast: `{forecast}` "
-        f"(Surprise: `{diff_sign}{diff:.2f}`)\n\n"
-        f"📝 *Verdict:* _{verdict_explanation}_\n"
-        f"─────────────────────\n"
-        f"📊 Recorded into historical hit-rate ledger (transparent & unedited)."
-    )
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        log.warning("Telegram is not configured; %s alert was not sent", alert_type)
+        return False
+    db.add(AlertLog(
+        event_code=event_code,
+        release_time_str=release_time,
+        alert_type=alert_type,
+    ))
     try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
-    except Exception as e:
-        log.error("Failed to send outcome alert: %s", e)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return False
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": message},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except Exception:
+        db.query(AlertLog).filter_by(
+            event_code=event_code,
+            release_time_str=release_time,
+            alert_type=alert_type,
+        ).delete()
+        db.commit()
+        log.exception("Failed sending %s alert for %s/%s", alert_type, event_code, release_time)
+        return False
+
+
+def send_actual_posted_alert(db, pred, actual: float, forecast: float) -> bool:
+    """Send one immediate actual-versus-forecast update with the stored pre-release call."""
+    message = _format_actual_posted_message(pred, actual, forecast)
+    return _send_release_alert_once(
+        db, pred.event_code, pred.release_time_utc, "ACTUAL_POSTED", message
+    )
+
+
+def _format_actual_posted_message(pred, actual: float, forecast: float) -> str:
+    surprise = actual - forecast
+    sign = "+" if surprise > 0 else ""
+    return (
+        f"ACTUAL POSTED — {pred.event_display_name or pred.event_code}\n"
+        f"Actual: {actual} | Forecast: {forecast} | Surprise: {sign}{surprise:.4f}\n"
+        f"Pre-release call: {pred.lean_direction or 'UNAVAILABLE'} "
+        f"({pred.confidence_pct or 0:.0f}%)\n"
+        "Price reaction result will follow after grading."
+    )
+
+
+def send_price_result_alert(db, pred) -> bool:
+    """Send the short price-only result after price grading has completed."""
+    message = _format_price_result_message(pred)
+    if message is None:
+        return False
+    return _send_release_alert_once(
+        db, pred.event_code, pred.release_time_utc, "PRICE_RESULT", message
+    )
+
+
+def _format_price_result_message(pred) -> Optional[str]:
+    labels = {
+        "CORRECT": "correct",
+        "INCORRECT": "incorrect",
+        "NO_CLEAR_MOVE": "no clear move",
+    }
+    result = (pred.result_15m or "").upper()
+    if result not in labels or pred.price_graded_at is None:
+        return None
+    move = pred.usd_move_15m or "UNAVAILABLE"
+    return (
+        f"USD price result — {pred.event_code}: {labels[result]} "
+        f"({move}, 15m)."
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -161,21 +240,14 @@ def check_and_alert_upcoming():
       1. Pre-release check — send Telegram alert if event within 10-minute window.
          Only fires for HIGH or MEDIUM impact events.
       2. Post-release grading — grade predictions when actuals appear.
-      3. River learn_one() — called immediately after grading.
+      3. One River observation per fully graded release moment.
     """
     from learning import (
-        build_features, learn_one, lean_to_outcome,
-        predict_strength, _registry,
+        capture_prediction_features,
+        save_prediction_feature_snapshot,
+        train_release_moment,
+        _registry,
     )
-
-    def _registry_n_trained(ccy: str) -> int:
-        try:
-            return _registry.get_n_trained(ccy)
-        except Exception:
-            return 0
-    from data_sources import get_rate_differential, rate_diff_to_score
-    from sentiment import get_latest_cot, get_latest_sentiment, cot_to_score, sentiment_to_score
-    from indicators import persist_currency_strength
 
     # Keep reading ALERT_HOURS_BEFORE so /api/health still reports it correctly,
     # but pre-release alerts now use a fixed 10-minute window instead.
@@ -191,13 +263,17 @@ def check_and_alert_upcoming():
 
         for ev in events:
             code     = ev.get("event_code")
-            currency = ev.get("currency", "USD")
+            currency = ev.get("currency") or "USD"
             if not code:
                 continue
 
             # ── Impact filter: only HIGH and MEDIUM events trigger alerts ────
             impact = ev.get("impact", "")
             if impact not in ("HIGH", "MEDIUM"):
+                continue
+
+            # ── Numeric filter: skip speeches, minutes, statements ───────────
+            if not is_numeric_event(ev):
                 continue
 
             rel_str = ev.get("release_time_utc")
@@ -252,7 +328,7 @@ def check_and_alert_upcoming():
                         if not existing:
                             direction = pred_result["lean_direction"]
                             is_late_flag = check_is_late(now_utc, rel_str)
-                            db.add(PredictionModel(
+                            prediction = PredictionModel(
                                 created_at          = now_utc,
                                 event_code          = code,
                                 event_display_name  = event_cfg.get("display_name", code),
@@ -267,7 +343,17 @@ def check_and_alert_upcoming():
                                 pair_signals        = json.dumps(pair_signals),
                                 model_version       = "river_arf_v1",
                                 is_late             = is_late_flag,
-                            ))
+                            )
+                            db.add(prediction)
+                            db.flush()
+                            features = capture_prediction_features(
+                                currency,
+                                float(pred_result.get(
+                                    "indicator_score",
+                                    pred_result.get("composite_score") or 0.0,
+                                )),
+                            )
+                            save_prediction_feature_snapshot(db, prediction, features)
                             db.commit()
 
                         # Inject trade_signals from events config into pred_result for Telegram
@@ -293,9 +379,10 @@ def check_and_alert_upcoming():
                         ))
                         db.commit()
                     except Exception as err:
+                        db.rollback()
                         log.error("Pre-release alert failed for %s: %s", code, err)
 
-            # ── 2. POST-RELEASE GRADING + RIVER LEARN ────────────────────────
+            # ── 2. POST-RELEASE ACTUALS STORAGE (Data only) ──────────────────
             actual   = ev.get("actual")
             forecast = ev.get("forecast")
             if actual is not None and forecast is not None:
@@ -304,131 +391,72 @@ def check_and_alert_upcoming():
                     .filter(
                         PredictionModel.event_code       == code,
                         PredictionModel.release_time_utc == rel_str,
-                        PredictionModel.was_correct.is_(None),
                     )
                     .order_by(PredictionModel.created_at.desc())
                     .first()
                 )
-
                 if recent_pred:
-                    # Data-integrity rule: only pre-release predictions count
-                    # toward accuracy, ledger, and River training.
-                    if not is_pre_release_prediction(recent_pred):
+                    surprise = round(actual - forecast, 4)
+                    recent_pred.actual          = actual
+                    recent_pred.forecast        = forecast
+                    recent_pred.surprise        = surprise
+                    recent_pred.actual_surprise = surprise
+                    db.commit()
+                    send_actual_posted_alert(db, recent_pred, actual, forecast)
+
+            # ── 3. PRICE REACTION GRADING (>= 65 mins after release) ─────────
+            if minutes_until <= -65:
+                pending_preds = (
+                    db.query(PredictionModel)
+                    .filter(
+                        PredictionModel.event_code       == code,
+                        PredictionModel.release_time_utc == rel_str,
+                        PredictionModel.result_15m.is_(None),
+                    )
+                    .all()
+                )
+                for pred in pending_preds:
+                    process_and_grade_event_price_reactions(code, rel_str, pred_id=pred.id)
+                    db.refresh(pred)
+
+                    if not is_pre_release_prediction(pred):
                         log.info(
-                            "Skipping grading & River training for %s (id=%s): post-release/late prediction (is_late=%s)",
-                            code, recent_pred.id, recent_pred.is_late
+                            "Skipping River training for %s (id=%s): late prediction (is_late=%s)",
+                            code, pred.id, pred.is_late
                         )
-                    else:
-                        surprise = round(actual - forecast, 4)
-                        lean     = recent_pred.lean_direction
-                        was_correct, verdict_msg = grade_prediction(code, lean, actual, forecast)
+                        continue
 
-                        recent_pred.was_correct     = was_correct
-                        recent_pred.actual          = actual
-                        recent_pred.forecast        = forecast
-                        recent_pred.surprise        = surprise
-                        recent_pred.actual_surprise = surprise
-                        db.commit()
-
-                        # ── River learn_one() — strictly pre-release predictions only ──
-                        new_confidence = recent_pred.confidence_pct or 50.0
-                        n_after        = 0
-                        n_before       = 0
+                    stats = train_release_moment(rel_str)
+                    if stats:
                         try:
-                            rd   = get_rate_differential(currency)
-                            cot  = get_latest_cot(currency)
-                            sent = get_latest_sentiment(currency)
-
-                            n_before = _registry_n_trained(currency)
-                            features = build_features(
-                                indicator_score = float(recent_pred.composite_score or 0.0),
-                                rate_diff_score = rate_diff_to_score(rd),
-                                cot_score       = cot_to_score(cot),
-                                sentiment_score = sentiment_to_score(sent),
-                            )
-                            outcome = lean_to_outcome(lean, was_correct)
-                            stats   = learn_one(currency, features, outcome)
-                            n_after = stats.get("n_trained", 0)
-
-                            # Persist actual weight shift to the prediction row
-                            recent_pred.weight_shift = stats.get("weight_shift_str")
+                            pred.weight_shift = stats.get("weight_shift_str")
                             db.commit()
-
-                            log.info(
-                                "learn_one [%s] event=%s outcome=%d correct=%s "
-                                "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
-                                "n_trained: %d → %d  acc=%.1f%%  shift=%s",
-                                currency, code, outcome, was_correct,
-                                features.get("indicator_score", 0),
-                                features.get("rate_diff_score", 0),
-                                features.get("cot_score", 0),
-                                features.get("sentiment_score", 0),
-                                n_before, n_after,
-                                (stats.get("live_accuracy") or 0) * 100,
-                                recent_pred.weight_shift,
-                            )
-
-                            # Refresh currency strength snapshot after learning
-                            pred_strength = predict_strength(currency, features)
-                            new_confidence = pred_strength.confidence_pct
-                            persist_currency_strength(
-                                currency        = currency,
-                                strength_score  = pred_strength.strength_score,
-                                indicator_score = float(recent_pred.composite_score or 0.0),
-                                rate_diff_score = rate_diff_to_score(rd),
-                                cot_score       = cot_to_score(cot),
-                                sentiment_score = sentiment_to_score(sent),
-                                confidence_pct  = pred_strength.confidence_pct,
-                            )
                         except Exception as le:
-                            log.warning("River learn_one failed for %s/%s: %s", code, currency, le)
-
-                    # ── Post-release Telegram alert ───────────────────────────
-                    post_sent = db.query(AlertLog).filter(
-                        AlertLog.event_code       == code,
-                        AlertLog.release_time_str == rel_str,
-                        AlertLog.alert_type       == "POST_RELEASE",
-                    ).first()
-                    if not post_sent:
-                        # Compute monthly W/L for this currency
-                        try:
-                            from datetime import date
-                            _month_start = datetime(now_utc.year, now_utc.month, 1)
-                            _month_preds = (
-                                db.query(PredictionModel)
-                                .filter(
-                                    PredictionModel.currency    == currency,
-                                    PredictionModel.was_correct.isnot(None),
-                                    PredictionModel.is_sample.is_(False),
-                                    PredictionModel.is_late.is_(False),
-                                    PredictionModel.created_at  >= _month_start,
-                                )
-                                .all()
-                            )
-                            wins_this_month   = sum(1 for p in _month_preds if p.was_correct is True)
-                            losses_this_month = sum(1 for p in _month_preds if p.was_correct is False)
-                        except Exception:
-                            wins_this_month   = 0
-                            losses_this_month = 0
-
-                        send_post_release_alert(
-                            pred              = recent_pred,
-                            actual            = actual,
-                            forecast          = forecast,
-                            n_trained_before  = n_before,
-                            n_trained_after   = n_after,
-                            wins_this_month   = wins_this_month,
-                            losses_this_month = losses_this_month,
-                            was_correct       = was_correct,
-                            new_confidence    = new_confidence,
-                            event_name        = ev.get("event_name", code),
+                            log.warning("Failed to persist release grading for %s/%s: %s", code, currency, le)
+                    send_price_result_alert(db, pred)
+                    if pred.result_15m == "NO_CLEAR_MOVE":
+                        log.info(
+                            "Event %s move was %s (no clear move) — excluded from accuracy and learning",
+                            code, pred.usd_move_15m,
                         )
-                        db.add(AlertLog(
-                            event_code       = code,
-                            release_time_str = rel_str,
-                            alert_type       = "POST_RELEASE",
-                        ))
-                        db.commit()
+
+        # ── 4. SWEEP PENDING DATABASE PREDICTIONS (>= 65 mins after release) ─
+        pending_db_preds = (
+            db.query(PredictionModel)
+            .filter(
+                PredictionModel.result_15m.is_(None),
+                PredictionModel.release_time_utc.isnot(None),
+            )
+            .all()
+        )
+        for sp in pending_db_preds:
+            sp_rel = parse_release_utc(sp.release_time_utc)
+            if sp_rel and (now_utc - sp_rel).total_seconds() >= 65 * 60:
+                process_and_grade_event_price_reactions(sp.event_code, sp.release_time_utc, pred_id=sp.id)
+                db.refresh(sp)
+                send_price_result_alert(db, sp)
+                if is_pre_release_prediction(sp):
+                    train_release_moment(sp.release_time_utc)
 
     except Exception as e:
         log.error("check_and_alert_upcoming error: %s", e)
@@ -462,7 +490,7 @@ def refresh_rate_differentials():
 
 def refresh_sentiment_cycle():
     """
-    Pull GDELT + RSS articles and run FinBERT for USD sentiment.
+    Pull GDELT + RSS articles and score USD sentiment using a local lexicon.
     Runs every 12 hours.
     """
     try:
@@ -565,25 +593,93 @@ def refresh_currency_strengths():
         log.error("Currency strength refresh failed: %s", e)
 
 
+PERIODIC_JOB_CADENCES = {
+    "auto_alert_job": "every minute",
+    "rate_diff_job": "daily at 06:00 UTC",
+    "strength_job": "daily at 07:00 UTC",
+    "sentiment_job": "daily at 00:30 and 12:30 UTC",
+    "cot_job": "Friday at 16:00 UTC",
+}
+
+
+def run_cron_jobs(now: Optional[datetime] = None) -> list[str]:
+    """Run each due scheduler job once and persist its successful run timestamp."""
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    if now.tzinfo is not None:
+        now = now.astimezone(timezone.utc).replace(tzinfo=None)
+
+    jobs = {
+        "rate_diff_job": refresh_rate_differentials,
+        "strength_job": refresh_currency_strengths,
+        "sentiment_job": refresh_sentiment_cycle,
+        "cot_job": refresh_cot_cycle,
+    }
+    from database import SessionLocal
+
+    db = SessionLocal()
+    due_jobs = []
+    try:
+        rows = {
+            row.job_name: row.last_run_at
+            for row in db.query(PeriodicJobRun).all()
+        }
+        last_cycle = rows.get("auto_alert_job")
+        if last_cycle is None or (now - last_cycle).total_seconds() >= 55:
+            due_jobs.append(("auto_alert_job", check_and_alert_upcoming))
+
+        slots = {
+            "rate_diff_job": [datetime.combine(now.date(), datetime_time(6, 0))],
+            "strength_job": [datetime.combine(now.date(), datetime_time(7, 0))],
+            "sentiment_job": [
+                datetime.combine(now.date(), datetime_time(0, 30)),
+                datetime.combine(now.date(), datetime_time(12, 30)),
+            ],
+            "cot_job": (
+                [datetime.combine(now.date(), datetime_time(16, 0))]
+                if now.weekday() == 4 else []
+            ),
+        }
+        for job_name, run_at_values in slots.items():
+            last_run = rows.get(job_name)
+            if any(
+                now >= run_at
+                and (last_run is None or last_run < run_at)
+                for run_at in run_at_values
+            ):
+                due_jobs.append((job_name, jobs[job_name]))
+    finally:
+        db.close()
+
+    completed = []
+    for job_name, job in due_jobs:
+        job()
+        db = SessionLocal()
+        try:
+            row = db.get(PeriodicJobRun, job_name)
+            if row is None:
+                row = PeriodicJobRun(job_name=job_name)
+                db.add(row)
+            row.last_run_at = now
+            db.commit()
+            completed.append(job_name)
+        except Exception:
+            db.rollback()
+            log.exception("Failed to persist last_run_at for %s", job_name)
+            raise
+        finally:
+            db.close()
+    return completed
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SEED CHECK — run once on startup if models are untrained
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _maybe_seed_models():
-    """
-    Called once at startup.  Seeds any currency models that have n_trained == 0
-    using current COT + rate-differential priors.  Safe to call repeatedly —
-    already-trained models are skipped.
-    """
-    try:
-        from learning import seed_models_with_priors
-        seeded = seed_models_with_priors()
-        if seeded:
-            log.info("Seeded River models for: %s", list(seeded.keys()))
-        else:
-            log.info("All River models already have training data — seed skipped.")
-    except Exception as e:
-        log.warning("Model seeding failed: %s", e)
+def _rebuild_models_from_history():
+    """Rebuild River state from eligible, grouped, point-in-time outcomes."""
+    from learning import rebuild_model_from_history
+    summary = rebuild_model_from_history()
+    log.info("River history rebuild complete: %s", summary)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -637,10 +733,8 @@ def start_scheduler():
         id="cot_job",
     )
 
+    _rebuild_models_from_history()
     scheduler.start()
-
-    # Seed models on startup (non-blocking — runs in same thread before jobs fire)
-    _maybe_seed_models()
 
     log.info(
         "Scheduler started: alert=1min | rate_diff=06:00 UTC | "

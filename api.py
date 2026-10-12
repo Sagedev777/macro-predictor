@@ -31,8 +31,8 @@ from alerts import send_telegram_alert, send_test_message
 from calendar_feed import fetch_upcoming_red_folder_events, update_event_actual
 from config.events import CANONICAL_PAIRS, CURRENCIES, EVENTS, get_event_config
 from database import (
-    AlertLog,
     Prediction as PredictionModel,
+    PriceReaction,
     SessionLocal,
     check_is_late,
     init_db,
@@ -49,13 +49,20 @@ from learning import (
     compute_pair_bias,
     get_all_strengths,
     get_feature_importance_drift,
+    get_grouped_release_moments,
     predict_strength,
 )
-from price_data import build_all_order_suggestions, get_latest_suggestions
+from price_data import (
+    build_all_order_suggestions,
+    get_latest_suggestions,
+    parse_release_utc,
+    process_and_grade_event_price_reactions,
+)
 from scheduler import (
     check_and_alert_upcoming,
-    grade_prediction,
-    send_outcome_alert,
+    is_numeric_event,
+    send_actual_posted_alert,
+    send_price_result_alert,
     start_scheduler,
     stop_scheduler,
 )
@@ -87,7 +94,12 @@ app.add_middleware(
 @app.on_event("startup")
 def startup():
     init_db()
-    start_scheduler()
+    if os.getenv("ENABLE_BACKGROUND_SCHEDULER", "true").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        start_scheduler()
+    else:
+        log.info("In-process scheduler disabled; use run_tick.py cron runner.")
     log.info("MacroPredictor API v3 started — multi-currency mode active.")
 
 
@@ -117,7 +129,9 @@ def health():
         "supported_events":      list(EVENTS.keys()),
         "tracked_currencies":    CURRENCIES,
         "canonical_pairs":       CANONICAL_PAIRS,
-        "scheduler_running":     True,
+        "scheduler_running": os.getenv(
+            "ENABLE_BACKGROUND_SCHEDULER", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"},
     }
 
 
@@ -141,14 +155,12 @@ def get_upcoming_events(force_refresh: bool = False):
 def sync_actuals_from_feed():
     """
     Force a live Forex Factory refresh, auto-detect newly published actuals,
-    grade matching pre-release predictions, and trigger River learn_one().
+    store actual/forecast data for matching pre-release predictions.
     """
-    from learning import learn_one, lean_to_outcome
-    from data_sources import get_rate_differential, rate_diff_to_score
-    from sentiment import get_latest_cot, get_latest_sentiment, cot_to_score, sentiment_to_score
+    from learning import train_release_moment
 
     events = fetch_upcoming_red_folder_events(force_refresh=True)
-    graded = []
+    recorded = []
     db     = SessionLocal()
     try:
         for ev in events:
@@ -163,20 +175,11 @@ def sync_actuals_from_feed():
 
             event_cfg = get_event_config(code)
 
-            existing_graded = db.query(PredictionModel).filter(
-                PredictionModel.event_code == code,
-                PredictionModel.release_time_utc == release_time_utc,
-                PredictionModel.was_correct.isnot(None),
-            ).first()
-            if existing_graded:
-                continue
-
             pred = (
                 db.query(PredictionModel)
                 .filter(
                     PredictionModel.event_code == code,
                     PredictionModel.release_time_utc == release_time_utc,
-                    PredictionModel.was_correct.is_(None),
                 )
                 .order_by(PredictionModel.created_at.desc())
                 .first()
@@ -184,99 +187,50 @@ def sync_actuals_from_feed():
             if not pred:
                 continue
 
-            # Data-integrity rule: only pre-release predictions count toward grading/accuracy/training
             if not is_pre_release_prediction(pred):
                 log.info(
-                    "Skipping grading & River training for %s (id=%s): post-release/late prediction (is_late=%s)",
-                    code, pred.id, pred.is_late
+                    "Skipping actual storage for %s (id=%s): late prediction (is_late=%s)",
+                    code, pred.id, pred.is_late,
                 )
                 continue
 
-            was_correct, verdict_msg = grade_prediction(
-                code, pred.lean_direction, actual, forecast
-            )
             surprise = round(actual - forecast, 4)
-
             pred.actual          = actual
             pred.forecast        = forecast
             pred.surprise        = surprise
             pred.actual_surprise = surprise
-            pred.was_correct     = was_correct
             db.commit()
+            send_actual_posted_alert(db, pred, actual, forecast)
 
-            # ── River learn_one() after grading — strictly pre-release only ───
-            try:
-                from learning import _registry
-                n_before = _registry.get_n_trained(currency)
-                ind_score = float(pred.composite_score or 0.0)
+            # If release was >= 65 mins ago, trigger price reaction grading
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            rel_dt = parse_release_utc(release_time_utc)
+            if rel_dt and (now_utc - rel_dt).total_seconds() >= 65 * 60:
+                process_and_grade_event_price_reactions(code, release_time_utc, pred_id=pred.id)
+                db.refresh(pred)
 
-                rd   = get_rate_differential(currency)
-                cot  = get_latest_cot(currency)
-                sent = get_latest_sentiment(currency)
+                if is_pre_release_prediction(pred):
+                    try:
+                        train_release_moment(release_time_utc)
+                    except Exception as le:
+                        log.error("River release training failed for %s: %s", release_time_utc, le)
 
-                features = build_features(
-                    indicator_score = ind_score,
-                    rate_diff_score = rate_diff_to_score(rd),
-                    cot_score       = cot_to_score(cot),
-                    sentiment_score = sentiment_to_score(sent),
-                )
-                outcome = lean_to_outcome(pred.lean_direction, was_correct)
-                stats   = learn_one(currency, features, outcome)
-                pred.weight_shift = stats.get("weight_shift_str")
-                db.commit()
+            send_price_result_alert(db, pred)
 
-                log.info(
-                    "learn_one [%s] event=%s outcome=%d correct=%s "
-                    "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
-                    "n_trained: %d → %d  acc=%.1f%%  shift=%s",
-                    currency, code, outcome, was_correct,
-                    ind_score,
-                    features.get("rate_diff_score", 0),
-                    features.get("cot_score", 0),
-                    features.get("sentiment_score", 0),
-                    n_before, stats.get("n_trained", 0),
-                    (stats.get("live_accuracy") or 0) * 100,
-                    pred.weight_shift,
-                )
-            except Exception as le:
-                log.warning("River learn_one failed for %s: %s", code, le)
-
-            # ── Telegram outcome alert ─────────────────────────────────────────
-            try:
-                rel_str   = ev.get("release_time_utc", "")
-                post_sent = db.query(AlertLog).filter(
-                    AlertLog.event_code == code,
-                    AlertLog.release_time_str == rel_str,
-                    AlertLog.alert_type == "POST_RELEASE",
-                ).first()
-                if not post_sent:
-                    send_outcome_alert(
-                        code, actual, forecast, was_correct,
-                        pred.lean_direction, verdict_explanation=verdict_msg,
-                    )
-                    db.add(AlertLog(
-                        event_code=code, release_time_str=rel_str,
-                        alert_type="POST_RELEASE",
-                    ))
-                    db.commit()
-            except Exception as te:
-                log.warning("Telegram outcome alert failed for %s: %s", code, te)
-
-            graded.append({
+            recorded.append({
                 "event_code":   code,
                 "display_name": event_cfg.get("display_name", code),
                 "currency":     currency,
                 "actual":       actual,
                 "forecast":     forecast,
                 "surprise":     surprise,
-                "was_correct":  was_correct,
             })
 
         return {
             "success":       True,
             "synced_events": len(events),
-            "newly_graded":  len(graded),
-            "graded":        graded,
+            "actuals_recorded": len(recorded),
+            "recorded":      recorded,
         }
     finally:
         db.close()
@@ -403,10 +357,8 @@ class RecordActualPayload(BaseModel):
 
 @app.post("/api/events/record-actual")
 def record_actual_api(payload: RecordActualPayload):
-    """Record an actual release print and grade a linked pre-release forecast."""
-    from learning import learn_one, lean_to_outcome
-    from data_sources import get_rate_differential, rate_diff_to_score
-    from sentiment import get_latest_cot, get_latest_sentiment, cot_to_score, sentiment_to_score
+    """Record actual/forecast data; only price reaction determines prediction outcome."""
+    from learning import train_release_moment
 
     code     = payload.event_code.upper() if payload.event_code else None
     currency = payload.currency.upper() if payload.currency else "USD"
@@ -434,7 +386,6 @@ def record_actual_api(payload: RecordActualPayload):
             .filter(
                 PredictionModel.event_code == code,
                 PredictionModel.release_time_utc == payload.release_time_utc,
-                PredictionModel.was_correct.is_(None),
             )
             .order_by(PredictionModel.created_at.desc())
             .first()
@@ -458,65 +409,30 @@ def record_actual_api(payload: RecordActualPayload):
                     break
         if forecast is None:
             forecast = pred.forecast
-        if forecast is None:
-            return {
-                "success": True, "event_code": code, "actual": payload.actual,
-                "graded": False, "message": "Actual recorded; forecast unavailable for grading.",
-            }
-
-        was_correct, verdict_msg = grade_prediction(
-            code, pred.lean_direction, payload.actual, forecast
-        )
-        surprise = round(payload.actual - forecast, 4)
-
-        pred.actual = payload.actual; pred.forecast = forecast
-        pred.surprise = surprise; pred.actual_surprise = surprise
-        pred.was_correct = was_correct
+        pred.actual = payload.actual
+        surprise = None
+        if forecast is not None:
+            surprise = round(payload.actual - forecast, 4)
+            pred.forecast = forecast
+            pred.surprise = surprise
+            pred.actual_surprise = surprise
         db.commit()
+        if forecast is not None:
+            send_actual_posted_alert(db, pred, payload.actual, forecast)
 
-        # River learn_one — strictly pre-release predictions only
-        try:
-            from learning import _registry
-            n_before = _registry.get_n_trained(currency)
-            ind_score = float(pred.composite_score or 0.0)
+        # If release was >= 65 mins ago, trigger price reaction grading
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        rel_dt = parse_release_utc(pred.release_time_utc)
+        if rel_dt and (now_utc - rel_dt).total_seconds() >= 65 * 60:
+            process_and_grade_event_price_reactions(code, pred.release_time_utc, pred_id=pred.id)
+            db.refresh(pred)
+            send_price_result_alert(db, pred)
 
-            rd   = get_rate_differential(currency)
-            cot  = get_latest_cot(currency)
-            sent = get_latest_sentiment(currency)
-            features = build_features(
-                indicator_score = ind_score,
-                rate_diff_score = rate_diff_to_score(rd),
-                cot_score       = cot_to_score(cot),
-                sentiment_score = sentiment_to_score(sent),
-            )
-            outcome = lean_to_outcome(pred.lean_direction, was_correct)
-            stats   = learn_one(currency, features, outcome)
-            pred.weight_shift = stats.get("weight_shift_str")
-            db.commit()
-
-            log.info(
-                "learn_one [%s] event=%s outcome=%d correct=%s "
-                "features={ind=%.3f rd=%.3f cot=%.3f sent=%.3f} "
-                "n_trained: %d → %d  acc=%.1f%%  shift=%s",
-                currency, code, outcome, was_correct,
-                ind_score,
-                features.get("rate_diff_score", 0),
-                features.get("cot_score", 0),
-                features.get("sentiment_score", 0),
-                n_before, stats.get("n_trained", 0),
-                (stats.get("live_accuracy") or 0) * 100,
-                pred.weight_shift,
-            )
-        except Exception as le:
-            log.warning("River learn_one failed for %s: %s", code, le)
-
-        try:
-            send_outcome_alert(
-                code, payload.actual, forecast, was_correct,
-                pred.lean_direction, verdict_explanation=verdict_msg,
-            )
-        except Exception as te:
-            log.warning("Telegram alert failed: %s", te)
+            if is_pre_release_prediction(pred):
+                try:
+                    train_release_moment(pred.release_time_utc)
+                except Exception as le:
+                    log.error("River release training failed for %s: %s", pred.release_time_utc, le)
 
         return {
             "success":        True,
@@ -526,9 +442,9 @@ def record_actual_api(payload: RecordActualPayload):
             "forecast":       forecast,
             "surprise":       surprise,
             "lean_direction": pred.lean_direction,
-            "was_correct":    was_correct,
-            "graded":         True,
-            "verdict":        verdict_msg,
+            "result_15m":     pred.result_15m,
+            "actual_recorded": True,
+            "price_graded":   pred.result_15m in ("CORRECT", "INCORRECT"),
         }
     finally:
         db.close()
@@ -585,12 +501,26 @@ def get_prediction(event_code: str, send_alert: bool = False):
     pair_signals       = _get_pair_signals_for_event(code, currency, result)
     order_suggestions  = get_latest_suggestions(code)
 
+    # Requirement 5: Do not create predictions for events with no numeric forecast and actual
+    if not is_numeric_event({"event_code": code, "event_name": cfg.get("display_name", code), "forecast": forecast}):
+        return {
+            "event_code":   code,
+            "display_name": cfg.get("display_name", code),
+            "message":      "Predictions are disabled for non-numeric events (FOMC minutes, speeches, statements).",
+        }
+
     # Persist to DB
     now_utc      = datetime.now(timezone.utc).replace(tzinfo=None)
     is_late_flag = check_is_late(now_utc, release_time_utc)
+    from learning import capture_prediction_features, save_prediction_feature_snapshot
+    point_in_time_features = capture_prediction_features(
+        currency,
+        float(result.get("indicator_score", result.get("composite_score") or 0.0)),
+    )
 
     db   = SessionLocal()
     pred = PredictionModel(
+        created_at          = now_utc,
         event_code          = code,
         event_display_name  = cfg.get("display_name", code),
         release_time_utc    = release_time_utc,
@@ -605,6 +535,8 @@ def get_prediction(event_code: str, send_alert: bool = False):
         is_late             = is_late_flag,
     )
     db.add(pred)
+    db.flush()
+    save_prediction_feature_snapshot(db, pred, point_in_time_features)
     db.commit()
     db.refresh(pred)
     pred_id    = pred.id
@@ -710,6 +642,12 @@ def list_predictions(limit: int = 30):
             "pair_signals":     pair_signals,
             "created_at":       p.created_at.isoformat() if p.created_at else None,
             "was_correct":      p.was_correct,
+            "result_15m":       p.result_15m,
+            "usd_move_15m":     p.usd_move_15m,
+            "result_5m":        p.result_5m,
+            "usd_move_5m":      p.usd_move_5m,
+            "result_60m":       p.result_60m,
+            "usd_move_60m":     p.usd_move_60m,
             "actual_surprise":  p.actual_surprise,
             "forecast":         p.forecast,
             "actual":           p.actual,
@@ -724,6 +662,49 @@ def list_predictions(limit: int = 30):
     return {"count": len(predictions_data), "predictions": predictions_data}
 
 
+@app.get("/api/price-reactions")
+def get_price_reactions(event_code: Optional[str] = None):
+    """Return stored price reaction rows."""
+    db = SessionLocal()
+    try:
+        q = db.query(PriceReaction).order_by(PriceReaction.fetched_at.desc())
+        if event_code:
+            release_times = [
+                release_time for (release_time,) in db.query(
+                    PredictionModel.release_time_utc
+                ).filter(
+                    PredictionModel.event_code == event_code,
+                    PredictionModel.release_time_utc.isnot(None),
+                ).distinct().all()
+            ]
+            if release_times:
+                q = q.filter(PriceReaction.release_time_utc.in_(release_times))
+            else:
+                q = q.filter(PriceReaction.event_code == event_code)
+        rows = q.limit(100).all()
+        return [
+            {
+                "id":               r.id,
+                "event_code":       event_code or r.event_code,
+                "release_time_utc": r.release_time_utc,
+                "symbol":           r.symbol,
+                "price_at_release": r.price_at_release,
+                "price_5m":         r.price_5m,
+                "price_15m":        r.price_15m,
+                "price_60m":        r.price_60m,
+                "pct_change_5m":    r.pct_change_5m,
+                "pct_change_15m":   r.pct_change_15m,
+                "pct_change_60m":   r.pct_change_60m,
+                "atr_15m":          r.atr_15m,
+                "status":           r.status,
+                "fetched_at":       r.fetched_at.isoformat() if r.fetched_at else None,
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
 @app.get("/api/history")
 def get_historical_outcomes(limit: int = 30):
     """Return outcomes for forecasts saved before their scheduled release."""
@@ -731,7 +712,7 @@ def get_historical_outcomes(limit: int = 30):
     candidates = (
         db.query(PredictionModel)
         .filter(
-            PredictionModel.was_correct.isnot(None),
+            (PredictionModel.was_correct.isnot(None) | PredictionModel.result_15m.isnot(None)),
             PredictionModel.is_sample.is_(False),
             PredictionModel.is_late.is_(False),
         )
@@ -741,10 +722,14 @@ def get_historical_outcomes(limit: int = 30):
     graded = [p for p in candidates if is_pre_release_prediction(p)][:max(0, limit)]
     db.close()
 
-    total    = len(graded)
-    wins     = sum(1 for p in graded if p.was_correct is True)
-    losses   = sum(1 for p in graded if p.was_correct is False)
-    hit_rate = round((wins / total * 100), 1) if total > 0 else 0.0
+    evaluated_moments = [
+        moment for moment in get_grouped_release_moments()
+        if moment["hit"] is not None
+    ]
+    total     = len(evaluated_moments)
+    wins      = sum(1 for moment in evaluated_moments if moment["hit"] is True)
+    losses    = sum(1 for moment in evaluated_moments if moment["hit"] is False)
+    hit_rate  = round((wins / total * 100), 1) if total > 0 else 0.0
 
     return {
         "total_graded":  total,
@@ -764,6 +749,13 @@ def get_historical_outcomes(limit: int = 30):
                 "actual":          p.actual,
                 "surprise":        p.surprise,
                 "was_correct":     p.was_correct,
+                "result_15m":      p.result_15m or ("CORRECT" if p.was_correct is True else "INCORRECT" if p.was_correct is False else "NO_CLEAR_MOVE"),
+                "usd_move_15m":    p.usd_move_15m,
+                "result_5m":       p.result_5m,
+                "usd_move_5m":     p.usd_move_5m,
+                "result_60m":      p.result_60m,
+                "usd_move_60m":    p.usd_move_60m,
+                "status":          "no clear move" if p.result_15m == "NO_CLEAR_MOVE" else ("CORRECT" if p.was_correct is True else "INCORRECT" if p.was_correct is False else "PENDING"),
                 "trade_signals":   (
                     EVENTS.get(p.event_code, {})
                     .get("trade_signals", {})
@@ -780,25 +772,16 @@ def get_historical_outcomes(limit: int = 30):
 
 @app.get("/api/accuracy")
 def get_overall_accuracy():
-    """Return accuracy stats for non-sample pre-release forecasts."""
-    db         = SessionLocal()
-    candidates = (
-        db.query(PredictionModel)
-        .filter(
-            PredictionModel.was_correct.isnot(None),
-            PredictionModel.is_sample.is_(False),
-            PredictionModel.is_late.is_(False),
-        )
-        .all()
-    )
-    all_graded = [p for p in candidates if is_pre_release_prediction(p)]
-    db.close()
+    """Return accuracy stats with each clear price-graded release counted once."""
+    evaluated = [
+        moment for moment in get_grouped_release_moments()
+        if moment["hit"] is not None
+    ]
+    total     = len(evaluated)
+    wins      = sum(1 for moment in evaluated if moment["hit"] is True)
+    hit_rate  = round((wins / total * 100), 1) if total > 0 else 0.0
 
-    total    = len(all_graded)
-    wins     = sum(1 for p in all_graded if p.was_correct)
-    hit_rate = round((wins / total * 100), 1) if total > 0 else 0.0
-
-    # Per-event breakdown
+    # Group simultaneous event codes together so a release is still one observation.
     breakdown:          dict[str, dict]  = {}
     confidence_buckets: dict[str, dict]  = {
         "<60%":   {"total": 0, "wins": 0},
@@ -806,31 +789,37 @@ def get_overall_accuracy():
         "70-80%": {"total": 0, "wins": 0},
         ">80%":   {"total": 0, "wins": 0},
     }
-    # Per-currency breakdown (new)
     currency_breakdown: dict[str, dict] = {}
 
-    for p in all_graded:
-        code = p.event_code
-        ccy  = p.currency or "USD"
+    for moment in evaluated:
+        predictions = moment["predictions"]
+        codes = moment["event_codes"]
+        code_key = " + ".join(codes)
+        names = sorted({
+            p.event_display_name or p.event_code for p in predictions
+        })
+        breakdown.setdefault(
+            code_key, {"total": 0, "wins": 0, "name": " + ".join(names)}
+        )
+        breakdown[code_key]["total"] += 1
+        if moment["hit"] is True:
+            breakdown[code_key]["wins"] += 1
 
-        breakdown.setdefault(code, {"total": 0, "wins": 0, "name": p.event_display_name})
-        breakdown[code]["total"] += 1
-        if p.was_correct:
-            breakdown[code]["wins"] += 1
-
+        ccy = "USD"
         currency_breakdown.setdefault(ccy, {"total": 0, "wins": 0})
         currency_breakdown[ccy]["total"] += 1
-        if p.was_correct:
+        if moment["hit"] is True:
             currency_breakdown[ccy]["wins"] += 1
 
+        confidence = moment["confidence_pct"]
         bucket = (
-            "<60%"   if (p.confidence_pct or 0) < 60 else
-            "60-70%" if (p.confidence_pct or 0) < 70 else
-            "70-80%" if (p.confidence_pct or 0) < 80 else
+            "<60%"   if confidence < 60 else
+            "60-70%" if confidence < 70 else
+            "70-80%" if confidence < 80 else
             ">80%"
         )
         confidence_buckets[bucket]["total"] += 1
-        if p.was_correct:
+        if moment["hit"] is True:
             confidence_buckets[bucket]["wins"] += 1
 
     event_stats = [
@@ -865,6 +854,7 @@ def get_overall_accuracy():
 
     return {
         "total_predictions":  total,
+        "total_release_moments": total,
         "wins":               wins,
         "losses":             total - wins,
         "overall_hit_rate":   hit_rate,
@@ -1097,11 +1087,10 @@ def get_feature_drift():
 def get_model_status():
     """
     Per-currency River model status.
-    Returns n_trained, live_accuracy, feature_weights, last_updated.
-    n_trained=10 means only seed samples — no real learn_one() calls yet.
-    n_trained>10 means the feedback loop has fired at least once.
+    Returns n_trained, live_accuracy, feature_weights, and rebuild provenance.
     """
     from database import SessionLocal, RiverModelState
+    from learning import get_last_rebuild_summary
     db = SessionLocal()
     try:
         rows = {r.currency: r for r in db.query(RiverModelState).all()}
@@ -1125,31 +1114,23 @@ def get_model_status():
             "last_updated":    row.updated_at.isoformat() if row and row.updated_at else None,
             "status":          ("learning" if row and (row.n_trained or 0) > 0 else "untrained"),
         })
-    return {"currencies": result}
+    return {
+        "currencies": result,
+        "training_rebuild": get_last_rebuild_summary(),
+    }
 
 
 @app.get("/api/accuracy-trend")
 def get_accuracy_trend():
     """
-    Rolling accuracy over windows of 10 predictions per currency.
-    USD-only — filters to USD predictions exclusively.
+    Rolling accuracy over windows of 10 release moments.
+    USD-only — simultaneous predictions count as one observation.
     """
-    db = SessionLocal()
-    try:
-        candidates = (
-            db.query(PredictionModel)
-            .filter(
-                PredictionModel.was_correct.isnot(None),
-                PredictionModel.is_sample.is_(False),
-                PredictionModel.is_late.is_(False),
-                PredictionModel.currency == "USD",
-            )
-            .order_by(PredictionModel.created_at.asc())
-            .all()
-        )
-        all_graded = [p for p in candidates if is_pre_release_prediction(p)]
-    finally:
-        db.close()
+    all_graded = [
+        moment for moment in get_grouped_release_moments()
+        if moment["hit"] is not None
+    ]
+    all_graded.sort(key=lambda moment: moment["release_time_utc"])
 
     trend_data = []
     WINDOW = 10
@@ -1159,21 +1140,23 @@ def get_accuracy_trend():
         chunk = all_graded[i: i + WINDOW]
         if len(chunk) < 2:
             break
-        wins     = sum(1 for p in chunk if p.was_correct)
+        wins     = sum(1 for moment in chunk if moment["hit"] is True)
         hit_rate = round(wins / len(chunk) * 100, 1)
         windows.append({
             "window_start": i + 1,
             "window_end":   i + len(chunk),
             "predictions":  len(chunk),
+            "release_moments": len(chunk),
             "wins":         wins,
             "hit_rate_pct": hit_rate,
-            "date_from":    chunk[0].created_at.isoformat() if chunk[0].created_at else None,
-            "date_to":      chunk[-1].created_at.isoformat() if chunk[-1].created_at else None,
+            "date_from":    chunk[0]["release_time_utc"],
+            "date_to":      chunk[-1]["release_time_utc"],
         })
 
     trend_data.append({
         "currency":       "USD",
         "total_graded":   len(all_graded),
+        "release_moments": len(all_graded),
         "windows":        windows,
         "improving":      (len(windows) >= 2 and
                            windows[-1]["hit_rate_pct"] > windows[0]["hit_rate_pct"]),
@@ -1199,20 +1182,11 @@ def get_calibration(currency: Optional[str] = None):
     flagged = True when |actual_win_rate - stated_midpoint/100| > 0.10
     Only buckets with count > 0 are returned.
     """
-    db = SessionLocal()
-    try:
-        query = db.query(PredictionModel).filter(
-            PredictionModel.was_correct.isnot(None),
-            PredictionModel.is_sample.is_(False),
-            PredictionModel.is_late.is_(False),
-            PredictionModel.currency == "USD",
-        )
-        if currency:
-            query = query.filter(PredictionModel.currency == currency.upper())
-        candidates = query.all()
-        preds = [p for p in candidates if is_pre_release_prediction(p)]
-    finally:
-        db.close()
+    moments = [
+        moment for moment in get_grouped_release_moments()
+        if moment["hit"] is not None
+        and (currency is None or currency.upper() == "USD")
+    ]
 
     buckets = [
         {"bucket": "<60%",   "stated_midpoint": 55, "total": 0, "wins": 0},
@@ -1221,8 +1195,8 @@ def get_calibration(currency: Optional[str] = None):
         {"bucket": ">80%",   "stated_midpoint": 85, "total": 0, "wins": 0},
     ]
 
-    for p in preds:
-        conf = p.confidence_pct or 0.0
+    for moment in moments:
+        conf = moment["confidence_pct"]
         if conf < 60:
             idx = 0
         elif conf < 70:
@@ -1232,7 +1206,7 @@ def get_calibration(currency: Optional[str] = None):
         else:
             idx = 3
         buckets[idx]["total"] += 1
-        if p.was_correct:
+        if moment["hit"] is True:
             buckets[idx]["wins"] += 1
 
     result = []
@@ -1276,7 +1250,7 @@ def warmup_predictions(background_tasks=None):
     events = fetch_upcoming_red_folder_events()
     high_events = [
         e for e in events
-        if e.get("impact") == "HIGH" and e.get("event_code")
+        if e.get("impact") in ("HIGH", "MEDIUM") and e.get("event_code") and is_numeric_event(e)
     ]
 
     now_ts = time.time()
@@ -1289,6 +1263,8 @@ def warmup_predictions(background_tasks=None):
     triggered: list[str] = [e["event_code"] for e in to_run]
 
     def _run_predictions():
+        from learning import capture_prediction_features, save_prediction_feature_snapshot
+
         for ev in to_run:
             code = ev["event_code"]
             try:
@@ -1325,7 +1301,17 @@ def warmup_predictions(background_tasks=None):
                         PredictionModel.release_time_utc == release_time_utc,
                     ).first()
                     if not existing:
-                        db.add(PredictionModel(
+                        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                        is_late_flag = check_is_late(now_utc, release_time_utc)
+                        point_in_time_features = capture_prediction_features(
+                            currency,
+                            float(result.get(
+                                "indicator_score",
+                                result.get("composite_score") or 0.0,
+                            )),
+                        )
+                        prediction = PredictionModel(
+                            created_at          = now_utc,
                             event_code          = code,
                             event_display_name  = cfg.get("display_name", code),
                             release_time_utc    = release_time_utc,
@@ -1337,7 +1323,13 @@ def warmup_predictions(background_tasks=None):
                             currency            = currency,
                             pair_signals        = json.dumps(pair_signals),
                             model_version       = "river_arf_v1",
-                        ))
+                            is_late             = is_late_flag,
+                        )
+                        db.add(prediction)
+                        db.flush()
+                        save_prediction_feature_snapshot(
+                            db, prediction, point_in_time_features
+                        )
                         db.commit()
                 finally:
                     db.close()

@@ -18,7 +18,7 @@ MacroPredictor is a full-stack macro event prediction system that computes per-c
               │  1. indicator_score      │  ← indicators.py   (FRED z-scores)
               │  2. rate_diff_score      │  ← data_sources.py (yield spreads)
               │  3. cot_score            │  ← sentiment.py    (CFTC COT)
-              │  4. sentiment_score      │  ← sentiment.py    (FinBERT/GDELT)
+              │  4. sentiment_score      │  ← sentiment.py    (local lexicon/GDELT)
               └────────────┬────────────┘
                            │
               ┌────────────▼────────────┐
@@ -38,7 +38,7 @@ MacroPredictor is a full-stack macro event prediction system that computes per-c
               ┌────────────▼────────────┐
               │  price_data.py           │
               │  Twelve Data OHLC        │
-              │  pandas-ta ATR(14)       │
+              │  pandas Wilder ATR(14)   │
               │  Buy/Sell-stop levels    │
               └────────────┬────────────┘
                            │
@@ -63,9 +63,9 @@ MacroPredictor is a full-stack macro event prediction system that computes per-c
 | `scheduler.py` | APScheduler jobs — alerts, grading, River learn_one(), data refresh |
 | `indicators.py` | FRED z-score computation; currency-level aggregation; DB persistence |
 | `data_sources.py` | Unified fetch_series() router; rate-differential computation |
-| `sentiment.py` | GDELT + RSS article fetching; FinBERT scoring; CFTC COT parsing |
+| `sentiment.py` | GDELT + RSS article fetching; local lexicon scoring; CFTC COT parsing |
 | `learning.py` | River ARFClassifier registry; predict/learn/seed; pair bias computation |
-| `price_data.py` | Twelve Data OHLC; pandas-ta ATR(14); order-level suggestion builder |
+| `price_data.py` | Twelve Data OHLC; pandas Wilder ATR(14); order-level suggestion builder |
 | `calendar_feed.py` | Forex Factory JSON feed; multi-currency; red+orange impact |
 | `database.py` | SQLAlchemy models; init_db(); upsert/load helpers |
 | `alerts.py` | Telegram message formatting and delivery |
@@ -85,7 +85,7 @@ MacroPredictor is a full-stack macro event prediction system that computes per-c
 | `currency_strengths` | Per-currency strength snapshot (timestamped) |
 | `rate_differentials` | Daily benchmark yield spreads vs US 10Y |
 | `cot_snapshots` | CFTC COT net-long positioning per currency |
-| `sentiment_snapshots` | FinBERT 48h aggregated sentiment per currency |
+| `sentiment_snapshots` | 48-hour lexicon-scored sentiment per currency |
 | `river_model_state` | Serialised River ARFClassifier per currency (pickle) |
 | `pair_suggestions` | ATR-based order-level suggestions per event/pair |
 
@@ -95,11 +95,15 @@ MacroPredictor is a full-stack macro event prediction system that computes per-c
 
 | Job | Trigger | Function |
 |---|---|---|
-| Pre/post-release alerts + River learn_one() | Every 5 min | `check_and_alert_upcoming()` |
+| Release alerts, price grading + River learn_one() | Every minute | `check_and_alert_upcoming()` |
 | Rate differential refresh | Daily 06:00 UTC | `refresh_rate_differentials()` |
 | Currency strength cycle | Daily 07:00 UTC | `refresh_currency_strengths()` |
-| Sentiment refresh (FinBERT) | 00:30 and 12:30 UTC | `refresh_sentiment_cycle()` |
+| Sentiment refresh | 00:30 and 12:30 UTC | `refresh_sentiment_cycle()` |
 | CFTC COT update | Friday 16:00 UTC | `refresh_cot_cycle()` |
+
+`run_tick.py` uses the same cadence table and persists each job's `last_run_at`
+in `periodic_job_runs`; `release_moment_training` is the cross-process
+idempotency ledger for grouped River observations.
 
 ---
 
@@ -123,7 +127,7 @@ For each FRED/ECB/ONS series:
     "indicator_score":  float,  # z-score aggregate     [-1, +1]
     "rate_diff_score":  float,  # yield spread vs US10Y  [-1, +1]
     "cot_score":        float,  # CFTC net-long %        [-1, +1]
-    "sentiment_score":  float,  # FinBERT net score      [-1, +1]
+    "sentiment_score":  float,  # local lexicon net score [-1, +1]
 }
 ```
 
@@ -173,7 +177,6 @@ Output: `predict_proba_one()` → P(bullish) → `strength_score = 2 × P(bullis
 | ForexLive RSS | `https://www.forexlive.com/feed/news/` | No |
 | FXStreet RSS | `https://www.fxstreet.com/rss/news` | No |
 | CFTC COT | via `cot_reports` library | No |
-| FinBERT | `ProsusAI/finbert` (HuggingFace) | No — ~440 MB download |
 | Twelve Data | `https://api.twelvedata.com` | Yes — TWELVE_DATA_API_KEY |
 | Forex Factory | `https://nfs.faireconomy.media/ff_calendar_thisweek.json` | No |
 

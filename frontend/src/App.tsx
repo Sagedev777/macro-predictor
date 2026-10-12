@@ -935,9 +935,9 @@ function ModelPage() {
                     <span className="mistake-nums">fcst {h.forecast ?? '—'} / actual {h.actual ?? '—'} (surprise {surprise})</span>
                   </div>
                   <div className="mistake-field">
-                    <span className="mistake-label">Weight shift</span>
+                    <span className="mistake-label">Estimated weight shift</span>
                     <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
-                      {h.weight_shift ?? 'Equal priors retained (n<5) · Dynamic drift active at n=5'}
+                      {h.weight_shift ?? 'Not enough data \u2014 estimated weights shown after 5 real outcomes'}
                     </span>
                   </div>
                 </div>

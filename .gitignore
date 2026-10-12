@@ -16,6 +16,7 @@ __pycache__/
 *.db
 *.sqlite3
 *.log
+.run_tick.lock
 .DS_Store
 calendar_cache.json
 macro_predictor.db

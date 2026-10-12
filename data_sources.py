@@ -28,6 +28,8 @@ Public interface:
 All fetched series are cached in-process for TTL seconds (default 3600).
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import time

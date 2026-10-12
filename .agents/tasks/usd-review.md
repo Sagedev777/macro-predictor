@@ -42,7 +42,7 @@ The module-level docstring in `scheduler.py` still reads:
 
 ```
 Every 24 hr   — refresh_rate_differentials()  (yield spreads for all 8 currencies)
-Every 12 hr   — refresh_sentiment_cycle()     (GDELT + RSS + FinBERT for all 8)
+Every 12 hr   — refresh_sentiment_cycle()     (GDELT + RSS lexicon scoring for all 8)
 ```
 
 The `_INVERSE_EVENTS` block comment reads "Extended inverse-indicator set covering all 8 currencies" — that comment was on the old set that included `EUR_UNEMPLOYMENT`, `GBP_EMPLOYMENT`, etc. The set itself is now correctly pruned to `{"JOBLESS_CLAIMS", "UNEMPLOYMENT_RATE"}`, but the header still references 8 currencies. The function docstrings for `refresh_rate_differentials`, `refresh_sentiment_cycle`, and `refresh_currency_strengths` carry the same "all 8" wording. None of this causes a runtime defect, but it will mislead anyone reading the scheduler months from now.

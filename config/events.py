@@ -16,7 +16,7 @@ CURRENCY STRENGTH FORMULA (see learning.py)
       1. indicator_score   — weighted z-score aggregate of this file's indicators
       2. rate_diff_score   — local benchmark yield spread vs US 10Y
       3. cot_score         — CFTC COT net-long % of OI
-      4. sentiment_score   — FinBERT 48h net score
+      4. sentiment_score   — 48-hour local lexicon net score
 
 PAIR BIAS
   pair_bias(BASE/QUOTE) = strength(BASE) - strength(QUOTE)
